@@ -1,0 +1,18 @@
+[package]
+name = "picwe"
+version = "1.0.0"
+authors = ["ShamirSecret"]
+upgrade_policy = "compatible"
+
+[addresses]
+picwe = "3a50c5eb05b337d58451394486bf314ae3e35ab01490a22a7fdd9381582ca73b"
+setter = "0x91ab4d46cd54860284026d8c0074e24dcb305e8194c2317d1da91c056aeca070"
+balancer_address = "0x78f91f51cc2d9a2b0777b53dc084fdab224e8a38f94e8b6e8fc468bd48297872"
+crosschain_mint_role = "0x1da8736fe47acea2cd38bae8698853532711e1a5bb72a4f6c315f6a03d7ae7c3"
+weusd_fee_address = "0x375a7a6aafa71c1008d8b9f4d247287942f7dc54e8366af09b8f09db12c294cf"
+stablecoin_metadata_address = "0x9b4615bef67c79b9d2836ac997ecb9bc5914d89625a53cd7c06f8a30bf127e62"
+move_metadata_address = "0xa"
+
+[dependencies]
+AptosFramework = { local = "../framework/aptos-framework" }
+AptosStdlib = { local = "../framework/aptos-stdlib" }
