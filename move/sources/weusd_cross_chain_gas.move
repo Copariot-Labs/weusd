@@ -38,7 +38,8 @@ module picwe::weusd_cross_chain_gas {
         localUser: address,
         outerUser: String,
         amount: u64,
-        isburn: bool
+        isburn: bool,
+        targetChainId: u256
     }
 
     struct GlobalManage has key {
@@ -452,7 +453,7 @@ module picwe::weusd_cross_chain_gas {
         
         weusd_mint_redeem::reserve_stablecoin_for_cross_chain(burnAmount);
         
-        createRequest(requestId, msgsender, outerUser, burnAmount, true);
+        createRequest(requestId, msgsender, outerUser, burnAmount, true, targetChainId);
 
         event::emit_event(
             &mut borrow_global_mut<EventHandles>(@picwe).cross_chain_burn_events,
@@ -489,7 +490,7 @@ module picwe::weusd_cross_chain_gas {
         
         weusd_mint_redeem::return_stablecoin_from_cross_chain(amount);
         
-        createRequest(requestId, localUser, outerUser, amount, false);
+        createRequest(requestId, localUser, outerUser, amount, false, Block_chainid);
 
         event::emit_event(
             &mut borrow_global_mut<EventHandles>(@picwe).cross_chain_mint_events,
@@ -535,14 +536,16 @@ module picwe::weusd_cross_chain_gas {
         localUser: address,
         outerUser: String,
         amount: u64,
-        isburn: bool
+        isburn: bool,
+        targetChainId: u256
     ) acquires GlobalManage {
         let newRequest = RequestData { 
             requestId, 
             localUser, 
             outerUser, 
             amount, 
-            isburn 
+            isburn,
+            targetChainId
         };
 
         let requests = &mut borrow_global_mut<GlobalManage>(@picwe).requests;
@@ -866,13 +869,13 @@ module picwe::weusd_cross_chain_gas {
         let outer_user = string::utf8(b"0x7ab8Fa18A57E54af232eFe45E25e0d38f4070a5a");
         
         // Create a burn request for user1
-        createRequest(1, user1_addr, outer_user, 1000000, true);
+        createRequest(1, user1_addr, outer_user, 1000000, true, 0);
         
         // Create a burn request for user2
-        createRequest(2, user2_addr, outer_user, 2000000, true);
+        createRequest(2, user2_addr, outer_user, 2000000, true, 0);
         
         // Create a mint request for user1
-        createRequest(3, user1_addr, outer_user, 3000000, false);
+        createRequest(3, user1_addr, outer_user, 3000000, false, 0);
         
         // Test getting user1's source requests
         let (user1_source_requests, user1_source_count) = getUserSourceRequests(user1_addr, 0, 0);

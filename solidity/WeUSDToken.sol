@@ -26,4 +26,8 @@ contract PicWe_USD is ERC20, ERC20Burnable, AccessControl, ERC20Permit {
     function decimals() public view virtual override returns (uint8) {
         return 6;
     }
+
+    function tokenLogoURL() public pure returns (string memory) {
+        return "https://your-domain.com/weusd-token-logo.png";
+    }
 }

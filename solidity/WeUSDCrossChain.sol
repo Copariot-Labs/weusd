@@ -13,6 +13,7 @@ struct RequestData {
     string outerUser;
     uint256 amount;
     bool isburn;
+    uint256 targetChainId;
 }
 
 contract WeUSDCrossChain is AccessControl {
@@ -173,7 +174,7 @@ contract WeUSDCrossChain is AccessControl {
         weUSD.transferFrom(msg.sender, feeRecipient, totalFee);
         weUSD.burnFrom(msg.sender, burnAmount);
         mintRedeem.reserveStablecoinForCrossChain(burnAmount);
-        _createRequest(requestId, msg.sender, outerUser, burnAmount, true);
+        _createRequest(requestId, msg.sender, outerUser, burnAmount, true, targetChainId);
         emit CrossChainBurn(requestId, msg.sender, outerUser, sourceChainId, targetChainId, burnAmount);
     }
 
@@ -205,7 +206,7 @@ contract WeUSDCrossChain is AccessControl {
         require(!requestExists(requestId), "Request ID already exists");
         weUSD.mint(localUser, amount);
         mintRedeem.returnStablecoinFromCrossChain(amount);
-        _createRequest(requestId, localUser, outerUser, amount, false);
+        _createRequest(requestId, localUser, outerUser, amount, false, block.chainid);
         emit CrossChainMint(requestId, localUser, outerUser, sourceChainId, block.chainid, amount);
     }
 
@@ -247,7 +248,7 @@ contract WeUSDCrossChain is AccessControl {
             require(!requestExists(requestIds[i]), "Request ID already exists");
             weUSD.mint(localUsers[i], amounts[i]);           
             mintRedeem.returnStablecoinFromCrossChain(amounts[i]);           
-            _createRequest(requestIds[i], localUsers[i], outerUsers[i], amounts[i], false);
+            _createRequest(requestIds[i], localUsers[i], outerUsers[i], amounts[i], false, block.chainid);
             emit CrossChainMint(requestIds[i], localUsers[i], outerUsers[i], sourceChainIds[i], block.chainid, amounts[i]);
         }
     }
@@ -456,13 +457,14 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     // internal functions
-    function _createRequest(uint256 _requestId, address _localUser, string memory _outerUser, uint256 _amount, bool _isburn) internal {
+    function _createRequest(uint256 _requestId, address _localUser, string memory _outerUser, uint256 _amount, bool _isburn, uint256 _targetChainId) internal {
         RequestData memory newRequest = RequestData({
             requestId: _requestId,
             localUser: _localUser,
             outerUser: _outerUser,
             amount: _amount,
-            isburn: _isburn
+            isburn: _isburn,
+            targetChainId: _targetChainId
         });
         
         requests[_requestId] = newRequest;
