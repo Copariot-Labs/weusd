@@ -37,6 +37,7 @@ contract WeUSDCrossChain is AccessControl {
     mapping(uint256 => RequestData) private requests;
     mapping(uint256 => uint256) public requestIdToSourceActiveIndex;
     mapping(uint256 => uint256) public requestIdToTargetActiveIndex;
+    mapping(uint256 => bool) public supportedChains;
 
     event CrossChainBurn(uint256 indexed requestId, address indexed localUser, string outerUser, uint256 sourceChainId, uint256 targetChainId, uint256 amount);
     event CrossChainMint(uint256 indexed requestId, address indexed localUser, string outerUser, uint256 sourceChainId, uint256 targetChainId, uint256 amount);
@@ -44,6 +45,8 @@ contract WeUSDCrossChain is AccessControl {
     event ChainGasFeeSet(uint256 indexed targetChainId, uint256 gasfee);
     event ChainGasFeeRemoved(uint256 indexed targetChainId);
     event FeeRateSet(uint256 feeRateBasisPoints);
+    event SupportedChainAdded(uint256 indexed targetChainId);
+    event SupportedChainRemoved(uint256 indexed targetChainId);
 
     constructor(address _weUSD, address _crossChainMinter, address _feeRecipient) {
         weUSD = IPicweUSD(_weUSD);
@@ -148,6 +151,7 @@ contract WeUSDCrossChain is AccessControl {
     function setFeeRecipient(address _feeRecipient) external onlyRole(ADMIN_ROLE) {
         feeRecipient = _feeRecipient;
     }
+
     /**
      * @dev Burns weUSD tokens on the source chain for cross-chain transfer.
      * @param targetChainId The ID of the target chain where weUSD will be minted.
@@ -161,6 +165,7 @@ contract WeUSDCrossChain is AccessControl {
      */
     function burnWeUSDCrossChain(uint256 targetChainId, uint256 amount, string memory outerUser) external {
         require(targetChainId != block.chainid, "Target chain must be different from source chain");
+        require(supportedChains[targetChainId], "Unsupported target chain");
         uint256 currentGasFee = getChainGasfee(targetChainId);
         uint256 percentageFee = calculateFee(amount);
         uint256 totalFee = currentGasFee + percentageFee;
@@ -171,7 +176,7 @@ contract WeUSDCrossChain is AccessControl {
         uint256 requestId = (sourceChainId << 128) | (WEUSD_SALT << 64) | (++requestCount);
         require(!requestExists(requestId), "Request ID already exists");
         uint256 burnAmount = amount - totalFee;
-        weUSD.transferFrom(msg.sender, feeRecipient, totalFee);
+        require(weUSD.transferFrom(msg.sender, feeRecipient, totalFee), "Fee transfer failed");
         weUSD.burnFrom(msg.sender, burnAmount);
         mintRedeem.reserveStablecoinForCrossChain(burnAmount);
         _createRequest(requestId, msg.sender, outerUser, burnAmount, true, targetChainId);
@@ -252,6 +257,14 @@ contract WeUSDCrossChain is AccessControl {
             emit CrossChainMint(requestIds[i], localUsers[i], outerUsers[i], sourceChainIds[i], block.chainid, amounts[i]);
         }
     }
+
+    /**
+     * @dev Gets the total number of cross-chain requests.
+     * @return The current requestCount.
+     */
+    function getRequestCount() public view returns (uint256) {
+        return requestCount;
+    }    
     
     /**
      * @dev Retrieves the request data for a given request ID
@@ -329,7 +342,7 @@ contract WeUSDCrossChain is AccessControl {
     ) public view returns (RequestData[] memory, uint256) {
         require(startCount > 0, "Start count must be greater than 0");
         require(startCount <= requestCount, "Start count exceeds request count");
-        require(page == 0 || pageSize == 0 || (page > 0 && pageSize > 0), "Invalid page or page size");
+        require((page == 0 && pageSize == 0) || (page > 0 && pageSize > 0), "Invalid page or page size");
 
         uint256 totalRecords = requestCount - startCount + 1;
         uint256 startIndex = 0;
@@ -369,7 +382,7 @@ contract WeUSDCrossChain is AccessControl {
      * @notice If _page or _pageSize is 0, all requests will be returned
      */
     function getUserSourceRequests(address _user, uint256 _page, uint256 _pageSize) public view returns (uint256[] memory, uint256) {
-        require(_page == 0 || _pageSize == 0 || (_page > 0 && _pageSize > 0), "Invalid page or page size");
+        require((_page == 0 && _pageSize == 0) || (_page > 0 && _pageSize > 0), "Invalid page or page size");
 
         uint256 totalRequests = 0;
         for (uint256 i = 0; i < activeSourceRequests.length; i++) {
@@ -419,7 +432,7 @@ contract WeUSDCrossChain is AccessControl {
      * @notice If _page or _pageSize is 0, all requests will be returned
      */
     function getUserTargetRequests(address _user, uint256 _page, uint256 _pageSize) public view returns (uint256[] memory, uint256) {
-        require(_page == 0 || _pageSize == 0 || (_page > 0 && _pageSize > 0), "Invalid page or page size");
+        require((_page == 0 && _pageSize == 0) || (_page > 0 && _pageSize > 0), "Invalid page or page size");
 
         uint256 totalRequests = 0;
         for (uint256 i = 0; i < activeTargetRequests.length; i++) {
@@ -478,5 +491,15 @@ contract WeUSDCrossChain is AccessControl {
         }else{
             requestIdToTargetActiveIndex[_requestId] = activeTargetRequests.length - 1;
         }
+    }
+
+    function addSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
+        supportedChains[targetChainId] = true;
+        emit SupportedChainAdded(targetChainId);
+    }
+
+    function removeSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
+        supportedChains[targetChainId] = false;
+        emit SupportedChainRemoved(targetChainId);
     }
 }

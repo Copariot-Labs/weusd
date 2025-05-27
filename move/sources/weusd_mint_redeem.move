@@ -251,9 +251,23 @@ module picwe::weusd_mint_redeem {
         let mint_state = borrow_global_mut<MintState>(@picwe);
         assert!(mint_state.stablecoin_reserves >= amount, E_INSUFFICIENT_RESERVES);
         
-        // Deduct from reserves and add to cross-chain reserves
+        // Deduct from reserves
         mint_state.stablecoin_reserves = mint_state.stablecoin_reserves - amount;
-        mint_state.cross_chain_reserves = mint_state.cross_chain_reserves + amount;
+        // Repay any existing cross-chain deficit first
+        let mut to_reserve = amount;
+        if (mint_state.cross_chain_deficit > 0) {
+            let repay = if (to_reserve <= mint_state.cross_chain_deficit) {
+                to_reserve
+            } else {
+                mint_state.cross_chain_deficit
+            };
+            mint_state.cross_chain_deficit = mint_state.cross_chain_deficit - repay;
+            to_reserve = to_reserve - repay;
+        };
+        // Add remaining amount to cross-chain reserves
+        if (to_reserve > 0) {
+            mint_state.cross_chain_reserves = mint_state.cross_chain_reserves + to_reserve;
+        };
     }
 
     // Function to handle cross-chain USDT return

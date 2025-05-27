@@ -158,13 +158,20 @@ module picwe::weusd_cross_chain_gas {
         (amount * fee_rate) / BASIS_POINTS_DENOMINATOR
     }
 
+    /// @dev Gets the total number of cross-chain requests
+    #[view]
+    public fun getRequestCount(): u256 acquires GlobalManage {
+        let gm = borrow_global<GlobalManage>(@picwe);
+        gm.requestCount
+    }
+
     #[view]
     public fun getUserSourceRequests(
         user: address,
         page: u64,
         page_size: u64
     ): (vector<u256>, u64) acquires GlobalManage {
-        assert!(page == 0 || page_size == 0 || (page > 0 && page_size > 0), E_INVALID_PAGINATION);
+        assert!((page == 0 && page_size == 0) || (page > 0 && page_size > 0), E_INVALID_PAGINATION);
 
         let global_manage = borrow_global<GlobalManage>(@picwe);
         let active_requests = &global_manage.activeSourceRequests;
@@ -224,7 +231,7 @@ module picwe::weusd_cross_chain_gas {
         page: u64,
         page_size: u64
     ): (vector<u256>, u64) acquires GlobalManage {
-        assert!(page == 0 || page_size == 0 || (page > 0 && page_size > 0), E_INVALID_PAGINATION);
+        assert!((page == 0 && page_size == 0) || (page > 0 && page_size > 0), E_INVALID_PAGINATION);
 
         let global_manage = borrow_global<GlobalManage>(@picwe);
         let active_requests = &global_manage.activeTargetRequests;
@@ -299,7 +306,7 @@ module picwe::weusd_cross_chain_gas {
         let global_manage = borrow_global<GlobalManage>(@picwe);
         assert!(start_count > 0, E_INVALID_REQUEST_ID);
         assert!(start_count <= global_manage.requestCount, E_INVALID_REQUEST_ID);
-        assert!(page == 0 || page_size == 0 || (page > 0 && page_size > 0), E_INVALID_PAGINATION);
+        assert!((page == 0 && page_size == 0) || (page > 0 && page_size > 0), E_INVALID_PAGINATION);
 
         let total_records = global_manage.requestCount - start_count + 1;
         let start_index = 0;

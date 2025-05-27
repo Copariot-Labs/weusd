@@ -2,6 +2,7 @@
 pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "./IPicweUSD.sol";
 
@@ -10,6 +11,7 @@ import "./IPicweUSD.sol";
  * @dev Contract for minting and redeeming WeUSD tokens, with cross-chain support
  */
 contract WeUSDMintRedeem is AccessControl {
+    using SafeERC20 for IERC20;
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant BALANCER_ROLE = keccak256("BALANCER_ROLE");
     bytes32 public constant CROSS_CHAIN_ROLE = keccak256("CROSS_CHAIN_ROLE");
@@ -91,7 +93,7 @@ contract WeUSDMintRedeem is AccessControl {
     function mintWeUSD(uint256 weUSDAmount) external {
         require(stablecoin.balanceOf(msg.sender) >= weUSDAmount, "Insufficient balance");
         require(stablecoin.allowance(msg.sender, address(this)) >= weUSDAmount, "Insufficient allowance");
-        require(stablecoin.transferFrom(msg.sender, address(this), weUSDAmount), "Transfer failed");       
+        stablecoin.safeTransferFrom(msg.sender, address(this), weUSDAmount);
         // Update reserves
         stablecoinReserves += weUSDAmount;
         // Mint WeUSD tokens
@@ -116,11 +118,10 @@ contract WeUSDMintRedeem is AccessControl {
         weUSD.burnFrom(msg.sender, weUSDAmount);
         
         // Transfer stablecoin to recipient
-        require(stablecoin.transfer(msg.sender, actualStablecoinAmount), "Transfer failed");
-        
+        stablecoin.safeTransfer(msg.sender, actualStablecoinAmount);
         // Transfer fee to fee recipient
         if (fee > 0) {
-            require(stablecoin.transfer(feeRecipient, fee), "Fee transfer failed");
+            stablecoin.safeTransfer(feeRecipient, fee);
         }
         
         // Update reserves
@@ -166,8 +167,19 @@ contract WeUSDMintRedeem is AccessControl {
     function reserveStablecoinForCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE) {
         require(stablecoinReserves >= amount, "Insufficient reserves");
         
+        // Deduct from reserves
         stablecoinReserves -= amount;
-        crossChainReserves += amount;
+        // Repay any existing cross-chain deficit first
+        uint256 toReserve = amount;
+        if (crossChainDeficit > 0) {
+            uint256 repay = toReserve <= crossChainDeficit ? toReserve : crossChainDeficit;
+            crossChainDeficit -= repay;
+            toReserve -= repay;
+        }
+        // Add remaining to cross-chain reserves
+        if (toReserve > 0) {
+            crossChainReserves += toReserve;
+        }
         
         emit StablecoinReserved(amount);
     }
@@ -202,7 +214,7 @@ contract WeUSDMintRedeem is AccessControl {
      */
     function withdrawCrossChainReserves(uint256 amount, address recipient) external onlyRole(WITHDRAW_ROLE) {
         require(crossChainReserves >= amount, "Insufficient reserves");
-        require(stablecoin.transfer(recipient, amount), "Transfer failed");
+        stablecoin.safeTransfer(recipient, amount);
         
         crossChainReserves -= amount;
         emit CrossChainReservesWithdrawn(msg.sender, amount, recipient);
@@ -214,7 +226,7 @@ contract WeUSDMintRedeem is AccessControl {
      */
     function withdrawCrossChainReservesToBalancer(uint256 amount) external onlyRole(BALANCER_ROLE) {
         require(crossChainReserves >= amount, "Insufficient reserves");
-        require(stablecoin.transfer(msg.sender, amount), "Transfer failed");
+        stablecoin.safeTransfer(msg.sender, amount);
         
         crossChainReserves -= amount;
         emit CrossChainReservesWithdrawn(msg.sender, amount, msg.sender);
