@@ -253,16 +253,17 @@ module picwe::weusd_mint_redeem {
         
         // Deduct from reserves
         mint_state.stablecoin_reserves = mint_state.stablecoin_reserves - amount;
-        // Repay any existing cross-chain deficit first
-        let mut to_reserve = amount;
-        if (mint_state.cross_chain_deficit > 0) {
-            let repay = if (to_reserve <= mint_state.cross_chain_deficit) {
-                to_reserve
+        // Repay any existing cross-chain deficit first and compute remaining to reserve
+        let to_reserve = if (mint_state.cross_chain_deficit > 0) {
+            let repay = if (amount <= mint_state.cross_chain_deficit) {
+                amount
             } else {
                 mint_state.cross_chain_deficit
             };
             mint_state.cross_chain_deficit = mint_state.cross_chain_deficit - repay;
-            to_reserve = to_reserve - repay;
+            amount - repay
+        } else {
+            amount
         };
         // Add remaining amount to cross-chain reserves
         if (to_reserve > 0) {
