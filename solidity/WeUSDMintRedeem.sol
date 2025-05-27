@@ -165,22 +165,17 @@ contract WeUSDMintRedeem is AccessControl {
      * @notice This function can only be called by the WeUSDCrossChain contract
      */
     function reserveStablecoinForCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE) {
-        require(stablecoinReserves >= amount, "Insufficient reserves");
-        
-        // Deduct from reserves
-        stablecoinReserves -= amount;
-        // Repay any existing cross-chain deficit first
         uint256 toReserve = amount;
         if (crossChainDeficit > 0) {
             uint256 repay = toReserve <= crossChainDeficit ? toReserve : crossChainDeficit;
             crossChainDeficit -= repay;
             toReserve -= repay;
         }
-        // Add remaining to cross-chain reserves
+        require(stablecoinReserves >= toReserve, "Insufficient reserves");
+        stablecoinReserves -= toReserve;
         if (toReserve > 0) {
             crossChainReserves += toReserve;
         }
-        
         emit StablecoinReserved(amount);
     }
     

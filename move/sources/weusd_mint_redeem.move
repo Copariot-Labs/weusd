@@ -249,11 +249,7 @@ module picwe::weusd_mint_redeem {
         amount: u64
     ) acquires MintState {
         let mint_state = borrow_global_mut<MintState>(@picwe);
-        assert!(mint_state.stablecoin_reserves >= amount, E_INSUFFICIENT_RESERVES);
-        
-        // Deduct from reserves
-        mint_state.stablecoin_reserves = mint_state.stablecoin_reserves - amount;
-        // Repay any existing cross-chain deficit first and compute remaining to reserve
+        // Calculate the net amount that needs to be deducted from the reserves
         let to_reserve = if (mint_state.cross_chain_deficit > 0) {
             let repay = if (amount <= mint_state.cross_chain_deficit) {
                 amount
@@ -265,7 +261,10 @@ module picwe::weusd_mint_redeem {
         } else {
             amount
         };
-        // Add remaining amount to cross-chain reserves
+        assert!(mint_state.stablecoin_reserves >= to_reserve, E_INSUFFICIENT_RESERVES);
+        // Deduct only the actual amount to be reserved
+        mint_state.stablecoin_reserves = mint_state.stablecoin_reserves - to_reserve;
+        // Add the remaining amount to the cross-chain reserves
         if (to_reserve > 0) {
             mint_state.cross_chain_reserves = mint_state.cross_chain_reserves + to_reserve;
         };

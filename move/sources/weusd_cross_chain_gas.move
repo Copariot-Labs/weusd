@@ -32,6 +32,7 @@ module picwe::weusd_cross_chain_gas {
     const E_INVALID_REQUEST_ID: u64 = 1027;
     const E_REQUEST_NOT_FOUND: u64 = 1028;
     const E_INVALID_ARGS: u64 = 1029;
+    const E_UNSUPPORTED_CHAIN: u64 = 1030; // Unsupported target chain
 
     struct RequestData has store, copy, drop {
         requestId: u256,
@@ -53,6 +54,7 @@ module picwe::weusd_cross_chain_gas {
         requests: smart_table::SmartTable<u256, RequestData>,
         requestIdToSourceActiveIndex: smart_table::SmartTable<u256, u256>,
         requestIdToTargetActiveIndex: smart_table::SmartTable<u256, u256>,
+        supportedChains: smart_table::SmartTable<u256, bool>,
         cross_mint_role_contract: address
     }
 
@@ -338,7 +340,7 @@ module picwe::weusd_cross_chain_gas {
         (request_data_array, total_records)
     }
     
-    fun init_module(contract: &signer) {
+    fun init_module(contract: &signer) acquires GlobalManage {
         move_to(
             contract,
             GlobalManage {
@@ -352,6 +354,7 @@ module picwe::weusd_cross_chain_gas {
                 requests: smart_table::new<u256, RequestData>(),
                 requestIdToSourceActiveIndex: smart_table::new<u256, u256>(),
                 requestIdToTargetActiveIndex: smart_table::new<u256, u256>(),
+                supportedChains: smart_table::new<u256, bool>(),
                 cross_mint_role_contract: INITIAL_CROSS_CHAIN_MINT_ROLE
             }
         );
@@ -362,6 +365,10 @@ module picwe::weusd_cross_chain_gas {
                 cross_chain_mint_events: account::new_event_handle<CrossChainMint>(contract)
             }
         );
+        let supported_chains = &mut borrow_global_mut<GlobalManage>(@picwe).supportedChains;
+        smart_table::add(supported_chains, 97, true);
+        smart_table::add(supported_chains, 1, true);
+        smart_table::add(supported_chains, 421614, true);
     }
 
     public entry fun set_cross_chain_minter_role(
@@ -427,13 +434,48 @@ module picwe::weusd_cross_chain_gas {
         *fee_recipient = feeRecipient;
     }
 
+    public entry fun addSupportedChain(
+        caller: &signer,
+        targetChainId: u256
+    ) acquires GlobalManage {
+        assert!(
+            signer::address_of(caller) == @picwe,
+            error::permission_denied(E_ONLY_OWNER_CAN_SET_ROLE)
+        );
+        let supported_chains = &mut borrow_global_mut<GlobalManage>(@picwe).supportedChains;
+        if (!smart_table::contains(supported_chains, targetChainId)) {
+            smart_table::add(supported_chains, targetChainId, true);
+        }
+    }
+
+    public entry fun removeSupportedChain(
+        caller: &signer,
+        targetChainId: u256
+    ) acquires GlobalManage {
+        assert!(
+            signer::address_of(caller) == @picwe,
+            error::permission_denied(E_ONLY_OWNER_CAN_SET_ROLE)
+        );
+        let supported_chains = &mut borrow_global_mut<GlobalManage>(@picwe).supportedChains;
+        if (smart_table::contains(supported_chains, targetChainId)) {
+            smart_table::remove(supported_chains, targetChainId);
+        }
+    }
+
     public entry fun burnWeUSDCrossChain(
         caller: &signer,
         targetChainId: u256,
         amount: u64,
         outerUser: String
     ) acquires GlobalManage, EventHandles {
-        assert!(targetChainId != Block_chainid, E_DIFF);
+        assert!(
+            targetChainId != Block_chainid,
+            E_DIFF
+        );
+        assert!(
+            smart_table::contains(&borrow_global<GlobalManage>(@picwe).supportedChains, targetChainId),
+            E_UNSUPPORTED_CHAIN
+        );
         let gasfee = getChainGasfee(targetChainId);
         
         let percentage_fee = calculateFee(amount);
@@ -582,7 +624,7 @@ module picwe::weusd_cross_chain_gas {
         exists<GlobalManage>(@picwe)
     }
 
-    public entry fun initialize(admin: &signer) {
+    public entry fun initialize(admin: &signer) acquires GlobalManage {
         assert!(signer::address_of(admin) == @picwe, error::permission_denied(ENOT_OWNER));
         assert!(!exists<GlobalManage>(@picwe), error::already_exists(1));
         
@@ -609,7 +651,7 @@ module picwe::weusd_cross_chain_gas {
     }
 
     #[test_only]
-    public fun test_init_only(creator: &signer) {
+    public fun test_init_only(creator: &signer) acquires GlobalManage {
         init_module(creator);
         weusd::test_init_only(creator);
         weusd_mint_redeem::test_init_only(creator);
