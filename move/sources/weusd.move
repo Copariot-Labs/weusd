@@ -34,7 +34,7 @@ module picwe::weusd {
         primary_fungible_store::create_primary_store_enabled_fungible_asset(
             constructor_ref,
             option::none(),
-            utf8(b"WEUSD Coin v2"), /* name */
+            utf8(b"WEUSD"), /* name */
             utf8(ASSET_SYMBOL), /* symbol */
             6, /* decimals */
             utf8(b"https://raw.githubusercontent.com/pipimove/logo/refs/heads/main/coin_weusd.ico"), /* icon */

@@ -13,7 +13,7 @@ module picwe::weusd_cross_chain_gas {
     const WEUSD_SALT: u256 = 2;
     const Block_chainid: u256 = 7777777;
     const BASIS_POINTS_DENOMINATOR: u64 = 10000;
-    const DEFAULT_FEE_RATE_BASIS_POINTS: u64 = 30;
+    const DEFAULT_FEE_RATE_BASIS_POINTS: u64 = 100;
     const DEFAULT_CHAIN_GAS_FEE: u64 = 100000;
 
     const INITIAL_FEE_RECIPIENT: address = @weusd_fee_address;
@@ -60,7 +60,9 @@ module picwe::weusd_cross_chain_gas {
 
     struct EventHandles has key {
         cross_chain_burn_events: event::EventHandle<CrossChainBurn>,
-        cross_chain_mint_events: event::EventHandle<CrossChainMint>
+        cross_chain_mint_events: event::EventHandle<CrossChainMint>,
+        source_request_archived_deleted_events: event::EventHandle<SourceRequestArchivedAndDeleted>,
+        target_request_archived_deleted_events: event::EventHandle<TargetRequestArchivedAndDeleted>
     }
 
     #[event]
@@ -81,6 +83,16 @@ module picwe::weusd_cross_chain_gas {
         sourceChainId: u256,
         targetChainId: u256,
         amount: u64
+    }
+
+    #[event]
+    struct SourceRequestArchivedAndDeleted has drop, store {
+        requestId: u256
+    }
+
+    #[event]
+    struct TargetRequestArchivedAndDeleted has drop, store {
+        requestId: u256
     }
 
     #[view]
@@ -362,13 +374,18 @@ module picwe::weusd_cross_chain_gas {
             contract,
             EventHandles {
                 cross_chain_burn_events: account::new_event_handle<CrossChainBurn>(contract),
-                cross_chain_mint_events: account::new_event_handle<CrossChainMint>(contract)
+                cross_chain_mint_events: account::new_event_handle<CrossChainMint>(contract),
+                source_request_archived_deleted_events: account::new_event_handle<SourceRequestArchivedAndDeleted>(contract),
+                target_request_archived_deleted_events: account::new_event_handle<TargetRequestArchivedAndDeleted>(contract)
             }
         );
         let supported_chains = &mut borrow_global_mut<GlobalManage>(@picwe).supportedChains;
-        smart_table::add(supported_chains, 97, true);
+        smart_table::add(supported_chains, 56, true);
         smart_table::add(supported_chains, 1, true);
-        smart_table::add(supported_chains, 421614, true);
+        smart_table::add(supported_chains, 42161, true);
+        smart_table::add(supported_chains, 8453, true);
+        let chain_gas_fees = &mut borrow_global_mut<GlobalManage>(@picwe).chainGasFees;
+        smart_table::add(chain_gas_fees, 1, 1000000);
     }
 
     public entry fun set_cross_chain_minter_role(
@@ -459,6 +476,92 @@ module picwe::weusd_cross_chain_gas {
         let supported_chains = &mut borrow_global_mut<GlobalManage>(@picwe).supportedChains;
         if (smart_table::contains(supported_chains, targetChainId)) {
             smart_table::remove(supported_chains, targetChainId);
+        }
+    }
+
+    /// Archive and completely delete source request
+    public entry fun archive_and_delete_source_request(
+        caller: &signer,
+        requestId: u256
+    ) acquires GlobalManage, EventHandles {
+        assert!(signer::address_of(caller) == @picwe, error::permission_denied(ENOT_OWNER));
+        let gm = borrow_global_mut<GlobalManage>(@picwe);
+        assert!(smart_table::contains(&gm.requestIdToSourceActiveIndex, requestId), E_INVALID_REQUEST_ID);
+        let idx = (*smart_table::borrow(&gm.requestIdToSourceActiveIndex, requestId) as u64);
+        let vec = &mut gm.activeSourceRequests;
+        let len = vector::length(vec);
+        assert!(idx < len, E_INVALID_REQUEST_ID);
+        if (idx < len - 1) {
+            let last_id = *vector::borrow(vec, len - 1);
+            let slot = vector::borrow_mut(vec, idx);
+            *slot = last_id;
+            smart_table::add(&mut gm.requestIdToSourceActiveIndex, last_id, (idx as u256));
+        };
+        vector::pop_back(vec);
+        smart_table::remove(&mut gm.requestIdToSourceActiveIndex, requestId);
+        smart_table::remove(&mut gm.requests, requestId);
+        event::emit_event(
+            &mut borrow_global_mut<EventHandles>(@picwe).source_request_archived_deleted_events,
+            SourceRequestArchivedAndDeleted { requestId }
+        );
+    }
+
+    /// Archive and completely delete target request
+    public entry fun archive_and_delete_target_request(
+        caller: &signer,
+        requestId: u256
+    ) acquires GlobalManage, EventHandles {
+        assert!(signer::address_of(caller) == @picwe, error::permission_denied(ENOT_OWNER));
+        let gm = borrow_global_mut<GlobalManage>(@picwe);
+        assert!(smart_table::contains(&gm.requestIdToTargetActiveIndex, requestId), E_INVALID_REQUEST_ID);
+        let idx = (*smart_table::borrow(&gm.requestIdToTargetActiveIndex, requestId) as u64);
+        let vec = &mut gm.activeTargetRequests;
+        let len = vector::length(vec);
+        assert!(idx < len, E_INVALID_REQUEST_ID);
+        if (idx < len - 1) {
+            let last_id = *vector::borrow(vec, len - 1);
+            let slot = vector::borrow_mut(vec, idx);
+            *slot = last_id;
+            smart_table::add(&mut gm.requestIdToTargetActiveIndex, last_id, (idx as u256));
+        };
+        vector::pop_back(vec);
+        smart_table::remove(&mut gm.requestIdToTargetActiveIndex, requestId);
+        smart_table::remove(&mut gm.requests, requestId);
+        event::emit_event(
+            &mut borrow_global_mut<EventHandles>(@picwe).target_request_archived_deleted_events,
+            TargetRequestArchivedAndDeleted { requestId }
+        );
+    }
+
+    /// Batch archive and completely delete source requests
+    public entry fun batch_archive_and_delete_source_requests(
+        caller: &signer,
+        requestIds: vector<u256>
+    ) acquires GlobalManage, EventHandles {
+        let len = vector::length(&requestIds);
+        let i = 0;
+        while (i < len) {
+            let rid = *vector::borrow(&requestIds, i);
+            if (smart_table::contains(&borrow_global<GlobalManage>(@picwe).requestIdToSourceActiveIndex, rid)) {
+                archive_and_delete_source_request(caller, rid);
+            };
+            i = i + 1;
+        }
+    }
+
+    /// Batch archive and completely delete target requests
+    public entry fun batch_archive_and_delete_target_requests(
+        caller: &signer,
+        requestIds: vector<u256>
+    ) acquires GlobalManage, EventHandles {
+        let len = vector::length(&requestIds);
+        let i = 0;
+        while (i < len) {
+            let rid = *vector::borrow(&requestIds, i);
+            if (smart_table::contains(&borrow_global<GlobalManage>(@picwe).requestIdToTargetActiveIndex, rid)) {
+                archive_and_delete_target_request(caller, rid);
+            };
+            i = i + 1;
         }
     }
 

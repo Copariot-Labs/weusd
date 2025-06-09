@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "./IPicweUSD.sol";
+import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
 /**
  * @title WeUSDMintRedeem
@@ -19,11 +20,11 @@ contract WeUSDMintRedeem is AccessControl {
     
     // Decimals
     uint8 public constant WEUSD_DECIMALS = 6;
-    uint8 public constant STABLECOIN_DECIMALS = 6;
     
     // Contracts
     IPicweUSD public weUSD;
     IERC20 public stablecoin;
+    uint8 public stablecoinDecimals;
     address public crossChainContract;
     
     // Fee settings
@@ -47,6 +48,7 @@ contract WeUSDMintRedeem is AccessControl {
     event CrossChainContractSet(address indexed crossChainContract);
     event StablecoinReserved(uint256 amount);
     event StablecoinReturned(uint256 amount, uint256 deficit);
+    event StablecoinSet(address indexed newStablecoin, uint8 decimals);
     
     // Error messages
     error InsufficientFee();
@@ -65,6 +67,7 @@ contract WeUSDMintRedeem is AccessControl {
     constructor(address _weUSD, address _stablecoin, address _feeRecipient, address _balancer) {
         weUSD = IPicweUSD(_weUSD);
         stablecoin = IERC20(_stablecoin);
+        stablecoinDecimals = IERC20Metadata(_stablecoin).decimals();
         feeRecipient = _feeRecipient;
         
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
@@ -91,14 +94,21 @@ contract WeUSDMintRedeem is AccessControl {
      * @param weUSDAmount Amount of WeUSD to mint
      */
     function mintWeUSD(uint256 weUSDAmount) external {
-        require(stablecoin.balanceOf(msg.sender) >= weUSDAmount, "Insufficient balance");
-        require(stablecoin.allowance(msg.sender, address(this)) >= weUSDAmount, "Insufficient allowance");
-        stablecoin.safeTransferFrom(msg.sender, address(this), weUSDAmount);
-        // Update reserves
-        stablecoinReserves += weUSDAmount;
-        // Mint WeUSD tokens
-        weUSD.mint(msg.sender, weUSDAmount);        
-        emit MintedWeUSD(msg.sender, weUSDAmount, weUSDAmount, 0);
+        require(weUSDAmount >= minAmount, "Amount too small");
+        uint256 scMintAmount;
+        if (stablecoinDecimals == WEUSD_DECIMALS) {
+            scMintAmount = weUSDAmount;
+        } else if (stablecoinDecimals > WEUSD_DECIMALS) {
+            scMintAmount = weUSDAmount * (10 ** (stablecoinDecimals - WEUSD_DECIMALS));
+        } else {
+            scMintAmount = weUSDAmount / (10 ** (WEUSD_DECIMALS - stablecoinDecimals))+1;
+        }
+        require(stablecoin.balanceOf(msg.sender) >= scMintAmount, "Insufficient balance");
+        require(stablecoin.allowance(msg.sender, address(this)) >= scMintAmount, "Insufficient allowance");
+        stablecoin.safeTransferFrom(msg.sender, address(this), scMintAmount);
+        stablecoinReserves += scMintAmount;
+        weUSD.mint(msg.sender, weUSDAmount);
+        emit MintedWeUSD(msg.sender, scMintAmount, weUSDAmount, 0);
     }
     
     /**
@@ -107,28 +117,26 @@ contract WeUSDMintRedeem is AccessControl {
      */
     function redeemWeUSD(uint256 weUSDAmount) external {
         require(weUSDAmount >= minAmount, "Amount too small");
-        require(stablecoinReserves >= weUSDAmount, "Insufficient reserves");
-        
-        // Calculate fee
-        uint256 fee = (weUSDAmount * feeRatio) / 10000;
-        uint256 actualStablecoinAmount = weUSDAmount - fee;
-        require(actualStablecoinAmount > 0, "Zero amount after fee");
-        
-        // Burn WeUSD tokens
-        weUSD.burnFrom(msg.sender, weUSDAmount);
-        
-        // Transfer stablecoin to recipient
-        stablecoin.safeTransfer(msg.sender, actualStablecoinAmount);
-        // Transfer fee to fee recipient
-        if (fee > 0) {
-            stablecoin.safeTransfer(feeRecipient, fee);
+        uint256 scRedeemAmount;
+        if (stablecoinDecimals == WEUSD_DECIMALS) {
+            scRedeemAmount = weUSDAmount;
+        } else if (stablecoinDecimals > WEUSD_DECIMALS) {
+            scRedeemAmount = weUSDAmount * (10 ** (stablecoinDecimals - WEUSD_DECIMALS));
+        } else {
+            scRedeemAmount = weUSDAmount / (10 ** (WEUSD_DECIMALS - stablecoinDecimals));
         }
-        
-        // Update reserves
-        stablecoinReserves -= weUSDAmount;
-        accumulatedFees += fee;
-        
-        emit BurnedWeUSD(msg.sender, actualStablecoinAmount, weUSDAmount, fee);
+        require(stablecoinReserves >= scRedeemAmount, "Insufficient reserves");
+        uint256 feeSC = (scRedeemAmount * feeRatio) / 10000;
+        uint256 actualSC = scRedeemAmount - feeSC;
+        require(actualSC > 0, "Zero amount after fee");
+        weUSD.burnFrom(msg.sender, weUSDAmount);
+        stablecoin.safeTransfer(msg.sender, actualSC);
+        if (feeSC > 0) {
+            stablecoin.safeTransfer(feeRecipient, feeSC);
+        }
+        stablecoinReserves -= scRedeemAmount;
+        accumulatedFees += feeSC;
+        emit BurnedWeUSD(msg.sender, actualSC, weUSDAmount, feeSC);
     }
     
     /**
@@ -265,5 +273,15 @@ contract WeUSDMintRedeem is AccessControl {
      */
     function getCrossChainDeficit() external view returns (uint256) {
         return crossChainDeficit;
+    }
+    
+    /**
+     * @dev Set a new stablecoin contract and update its decimals
+     * @param _stablecoin Address of the new stablecoin token
+     */
+    function setStablecoin(address _stablecoin) external onlyRole(ADMIN_ROLE) {
+        stablecoin = IERC20(_stablecoin);
+        stablecoinDecimals = IERC20Metadata(_stablecoin).decimals();
+        emit StablecoinSet(_stablecoin, stablecoinDecimals);
     }
 }

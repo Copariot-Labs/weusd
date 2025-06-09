@@ -25,9 +25,9 @@ contract WeUSDCrossChain is AccessControl {
     uint8 public constant WEUSD_DECIMALS = 6;
     uint256 public constant WEUSD_SALT = 2;
     uint256 public constant BASIS_POINTS_DENOMINATOR = 10000;
-    // 0.3%
-    uint256 private feeRateBasisPoints = 30;
-    uint256 public gasfee = 5*10**(6-1);
+    // 1%
+    uint256 private feeRateBasisPoints = 100;
+    uint256 public gasfee = 1*10**(6-1);
     address public feeRecipient;
 
     uint256[] public activeSourceRequests;
@@ -47,6 +47,8 @@ contract WeUSDCrossChain is AccessControl {
     event FeeRateSet(uint256 feeRateBasisPoints);
     event SupportedChainAdded(uint256 indexed targetChainId);
     event SupportedChainRemoved(uint256 indexed targetChainId);
+    event SourceRequestArchivedAndDeleted(uint256 indexed requestId);
+    event TargetRequestArchivedAndDeleted(uint256 indexed requestId);
 
     constructor(address _weUSD, address _crossChainMinter, address _feeRecipient) {
         weUSD = IPicweUSD(_weUSD);
@@ -501,5 +503,67 @@ contract WeUSDCrossChain is AccessControl {
     function removeSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
         supportedChains[targetChainId] = false;
         emit SupportedChainRemoved(targetChainId);
+    }
+
+    /**
+     * @dev Archive and completely delete source request
+     * @param requestId The requestId to archive
+     */
+    function archiveAndDeleteSourceRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
+        uint256 idx = requestIdToSourceActiveIndex[requestId];
+        require(activeSourceRequests.length > idx && activeSourceRequests[idx] == requestId, "Invalid requestId");
+        // swap and pop
+        uint256 lastId = activeSourceRequests[activeSourceRequests.length - 1];
+        activeSourceRequests[idx] = lastId;
+        requestIdToSourceActiveIndex[lastId] = idx;
+        activeSourceRequests.pop();
+        delete requestIdToSourceActiveIndex[requestId];
+        // Delete main data
+        delete requests[requestId];
+        emit SourceRequestArchivedAndDeleted(requestId);
+    }
+
+    /**
+     * @dev Archive and completely delete target request
+     * @param requestId The requestId to archive
+     */
+    function archiveAndDeleteTargetRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
+        uint256 idx = requestIdToTargetActiveIndex[requestId];
+        require(activeTargetRequests.length > idx && activeTargetRequests[idx] == requestId, "Invalid requestId");
+        // swap and pop
+        uint256 lastId = activeTargetRequests[activeTargetRequests.length - 1];
+        activeTargetRequests[idx] = lastId;
+        requestIdToTargetActiveIndex[lastId] = idx;
+        activeTargetRequests.pop();
+        delete requestIdToTargetActiveIndex[requestId];
+        // Delete main data
+        delete requests[requestId];
+        emit TargetRequestArchivedAndDeleted(requestId);
+    }
+
+    /**
+     * @dev Batch archive and completely delete source requests
+     * @param requestIds Array of requestIds to archive
+     */
+    function batchArchiveAndDeleteSourceRequests(uint256[] calldata requestIds) external onlyRole(ADMIN_ROLE) {
+        for (uint256 i = 0; i < requestIds.length; i++) {
+            uint256 requestId = requestIds[i];
+            if (requestIdToSourceActiveIndex[requestId] < activeSourceRequests.length && activeSourceRequests[requestIdToSourceActiveIndex[requestId]] == requestId) {
+                archiveAndDeleteSourceRequest(requestId);
+            }
+        }
+    }
+
+    /**
+     * @dev Batch archive and completely delete target requests
+     * @param requestIds Array of requestIds to archive
+     */
+    function batchArchiveAndDeleteTargetRequests(uint256[] calldata requestIds) external onlyRole(ADMIN_ROLE) {
+        for (uint256 i = 0; i < requestIds.length; i++) {
+            uint256 requestId = requestIds[i];
+            if (requestIdToTargetActiveIndex[requestId] < activeTargetRequests.length && activeTargetRequests[requestIdToTargetActiveIndex[requestId]] == requestId) {
+                archiveAndDeleteTargetRequest(requestId);
+            }
+        }
     }
 }
