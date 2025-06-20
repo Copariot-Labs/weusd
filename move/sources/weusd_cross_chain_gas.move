@@ -491,12 +491,17 @@ module picwe::weusd_cross_chain_gas {
         let vec = &mut gm.activeSourceRequests;
         let len = vector::length(vec);
         assert!(idx < len, E_INVALID_REQUEST_ID);
+        
+        // Only swap if the element to delete is not the last element
         if (idx < len - 1) {
             let last_id = *vector::borrow(vec, len - 1);
             let slot = vector::borrow_mut(vec, idx);
             *slot = last_id;
+            // Update the index mapping for the moved element
+            smart_table::remove(&mut gm.requestIdToSourceActiveIndex, last_id);
             smart_table::add(&mut gm.requestIdToSourceActiveIndex, last_id, (idx as u256));
         };
+        
         vector::pop_back(vec);
         smart_table::remove(&mut gm.requestIdToSourceActiveIndex, requestId);
         smart_table::remove(&mut gm.requests, requestId);
@@ -518,12 +523,17 @@ module picwe::weusd_cross_chain_gas {
         let vec = &mut gm.activeTargetRequests;
         let len = vector::length(vec);
         assert!(idx < len, E_INVALID_REQUEST_ID);
+        
+        // Only swap if the element to delete is not the last element
         if (idx < len - 1) {
             let last_id = *vector::borrow(vec, len - 1);
             let slot = vector::borrow_mut(vec, idx);
             *slot = last_id;
+            // Update the index mapping for the moved element
+            smart_table::remove(&mut gm.requestIdToTargetActiveIndex, last_id);
             smart_table::add(&mut gm.requestIdToTargetActiveIndex, last_id, (idx as u256));
         };
+        
         vector::pop_back(vec);
         smart_table::remove(&mut gm.requestIdToTargetActiveIndex, requestId);
         smart_table::remove(&mut gm.requests, requestId);

@@ -90,19 +90,42 @@ contract WeUSDMintRedeem is AccessControl {
     }
     
     /**
+     * @dev Convert WeUSD amount to stablecoin amount based on decimal differences
+     * @param weUSDAmount Amount in WeUSD decimals
+     * @return Amount in stablecoin decimals
+     */
+    function _convertWeUSDToStablecoin(uint256 weUSDAmount) internal view returns (uint256) {
+        if (stablecoinDecimals == WEUSD_DECIMALS) {
+            return weUSDAmount;
+        } else if (stablecoinDecimals > WEUSD_DECIMALS) {
+            return weUSDAmount * (10 ** (stablecoinDecimals - WEUSD_DECIMALS));
+        } else {
+            return weUSDAmount / (10 ** (WEUSD_DECIMALS - stablecoinDecimals));
+        }
+    }
+
+    /**
+     * @dev Convert WeUSD amount to stablecoin amount for minting (with rounding up)
+     * @param weUSDAmount Amount in WeUSD decimals
+     * @return Amount in stablecoin decimals
+     */
+    function _convertWeUSDToStablecoinForMint(uint256 weUSDAmount) internal view returns (uint256) {
+        if (stablecoinDecimals == WEUSD_DECIMALS) {
+            return weUSDAmount;
+        } else if (stablecoinDecimals > WEUSD_DECIMALS) {
+            return weUSDAmount * (10 ** (stablecoinDecimals - WEUSD_DECIMALS));
+        } else {
+            return weUSDAmount / (10 ** (WEUSD_DECIMALS - stablecoinDecimals)) + 1;
+        }
+    }
+    
+    /**
      * @dev Mint WeUSD tokens
      * @param weUSDAmount Amount of WeUSD to mint
      */
     function mintWeUSD(uint256 weUSDAmount) external {
         require(weUSDAmount >= minAmount, "Amount too small");
-        uint256 scMintAmount;
-        if (stablecoinDecimals == WEUSD_DECIMALS) {
-            scMintAmount = weUSDAmount;
-        } else if (stablecoinDecimals > WEUSD_DECIMALS) {
-            scMintAmount = weUSDAmount * (10 ** (stablecoinDecimals - WEUSD_DECIMALS));
-        } else {
-            scMintAmount = weUSDAmount / (10 ** (WEUSD_DECIMALS - stablecoinDecimals))+1;
-        }
+        uint256 scMintAmount = _convertWeUSDToStablecoinForMint(weUSDAmount);
         require(stablecoin.balanceOf(msg.sender) >= scMintAmount, "Insufficient balance");
         require(stablecoin.allowance(msg.sender, address(this)) >= scMintAmount, "Insufficient allowance");
         stablecoin.safeTransferFrom(msg.sender, address(this), scMintAmount);
@@ -117,14 +140,7 @@ contract WeUSDMintRedeem is AccessControl {
      */
     function redeemWeUSD(uint256 weUSDAmount) external {
         require(weUSDAmount >= minAmount, "Amount too small");
-        uint256 scRedeemAmount;
-        if (stablecoinDecimals == WEUSD_DECIMALS) {
-            scRedeemAmount = weUSDAmount;
-        } else if (stablecoinDecimals > WEUSD_DECIMALS) {
-            scRedeemAmount = weUSDAmount * (10 ** (stablecoinDecimals - WEUSD_DECIMALS));
-        } else {
-            scRedeemAmount = weUSDAmount / (10 ** (WEUSD_DECIMALS - stablecoinDecimals));
-        }
+        uint256 scRedeemAmount = _convertWeUSDToStablecoin(weUSDAmount);
         require(stablecoinReserves >= scRedeemAmount, "Insufficient reserves");
         uint256 feeSC = (scRedeemAmount * feeRatio) / 10000;
         uint256 actualSC = scRedeemAmount - feeSC;
@@ -169,11 +185,14 @@ contract WeUSDMintRedeem is AccessControl {
     
     /**
      * @dev Handle cross-chain USDT reserves
-     * @param amount Amount to reserve for cross-chain
+     * @param amount Amount to reserve for cross-chain (in WeUSD amount)
      * @notice This function can only be called by the WeUSDCrossChain contract
      */
     function reserveStablecoinForCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE) {
-        uint256 toReserve = amount;
+        // Convert WeUSD amount to stablecoin amount
+        uint256 scAmount = _convertWeUSDToStablecoin(amount);
+        
+        uint256 toReserve = scAmount;
         if (crossChainDeficit > 0) {
             uint256 repay = toReserve <= crossChainDeficit ? toReserve : crossChainDeficit;
             crossChainDeficit -= repay;
@@ -189,19 +208,22 @@ contract WeUSDMintRedeem is AccessControl {
     
     /**
      * @dev Handle cross-chain USDT return
-     * @param amount Amount to return from cross-chain
+     * @param amount Amount to return from cross-chain (in WeUSD amount)
      * @notice This function can only be called by the WeUSDCrossChain contract
      */
     function returnStablecoinFromCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE) {
+        // Convert WeUSD amount to stablecoin amount
+        uint256 scAmount = _convertWeUSDToStablecoin(amount);
+        
         uint256 deficit = 0;
         
-        if (crossChainReserves >= amount) {
+        if (crossChainReserves >= scAmount) {
             // If we have enough reserves, return them to the pool
-            crossChainReserves -= amount;
-            stablecoinReserves += amount;
+            crossChainReserves -= scAmount;
+            stablecoinReserves += scAmount;
         } else {
             // If not enough reserves, record the deficit
-            deficit = amount - crossChainReserves;
+            deficit = scAmount - crossChainReserves;
             stablecoinReserves += crossChainReserves;
             crossChainReserves = 0;
             crossChainDeficit += deficit;

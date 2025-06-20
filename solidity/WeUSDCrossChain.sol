@@ -512,10 +512,16 @@ contract WeUSDCrossChain is AccessControl {
     function archiveAndDeleteSourceRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
         uint256 idx = requestIdToSourceActiveIndex[requestId];
         require(activeSourceRequests.length > idx && activeSourceRequests[idx] == requestId, "Invalid requestId");
+        
         // swap and pop
-        uint256 lastId = activeSourceRequests[activeSourceRequests.length - 1];
-        activeSourceRequests[idx] = lastId;
-        requestIdToSourceActiveIndex[lastId] = idx;
+        uint256 lastIndex = activeSourceRequests.length - 1;
+        if (idx != lastIndex) {
+            // Only swap if the element to delete is not the last element
+            uint256 lastId = activeSourceRequests[lastIndex];
+            activeSourceRequests[idx] = lastId;
+            requestIdToSourceActiveIndex[lastId] = idx;
+        }
+        
         activeSourceRequests.pop();
         delete requestIdToSourceActiveIndex[requestId];
         // Delete main data
@@ -530,10 +536,16 @@ contract WeUSDCrossChain is AccessControl {
     function archiveAndDeleteTargetRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
         uint256 idx = requestIdToTargetActiveIndex[requestId];
         require(activeTargetRequests.length > idx && activeTargetRequests[idx] == requestId, "Invalid requestId");
+        
         // swap and pop
-        uint256 lastId = activeTargetRequests[activeTargetRequests.length - 1];
-        activeTargetRequests[idx] = lastId;
-        requestIdToTargetActiveIndex[lastId] = idx;
+        uint256 lastIndex = activeTargetRequests.length - 1;
+        if (idx != lastIndex) {
+            // Only swap if the element to delete is not the last element
+            uint256 lastId = activeTargetRequests[lastIndex];
+            activeTargetRequests[idx] = lastId;
+            requestIdToTargetActiveIndex[lastId] = idx;
+        }
+        
         activeTargetRequests.pop();
         delete requestIdToTargetActiveIndex[requestId];
         // Delete main data
