@@ -388,6 +388,24 @@ module picwe::weusd_cross_chain_gas {
         smart_table::add(chain_gas_fees, 1, 1000000);
     }
 
+    // Set fee recipient address with zero address check
+    // @param caller: Must be contract owner
+    // @param feeRecipient: New fee recipient address (cannot be zero)
+    public entry fun setFeeRecipient(
+        caller: &signer, feeRecipient: address
+    ) acquires GlobalManage {
+        assert!(
+            signer::address_of(caller) == @picwe, error::permission_denied(ENOT_OWNER)
+        );
+        // Check for zero address
+        assert!(feeRecipient != @0x0, error::invalid_argument(E_InvalidTargetUserAddress));
+        let fee_recipient = &mut borrow_global_mut<GlobalManage>(@picwe).feeRecipient;
+        *fee_recipient = feeRecipient;
+    }
+
+    // Set cross-chain minter role with zero address check
+    // @param caller: Must be contract owner
+    // @param account: New minter role address (cannot be zero)
     public entry fun set_cross_chain_minter_role(
         caller: &signer, account: address
     ) acquires GlobalManage {
@@ -395,6 +413,8 @@ module picwe::weusd_cross_chain_gas {
             signer::address_of(caller) == @picwe,
             error::permission_denied(E_ONLY_OWNER_CAN_SET_ROLE)
         );
+        // Check for zero address
+        assert!(account != @0x0, error::invalid_argument(E_InvalidTargetUserAddress));
         let cross_mint_role_contract =
             &mut borrow_global_mut<GlobalManage>(@picwe).cross_mint_role_contract;
         *cross_mint_role_contract = account;
@@ -439,16 +459,6 @@ module picwe::weusd_cross_chain_gas {
         if (smart_table::contains(chain_gas_fees, targetChainId)) {
             smart_table::remove(chain_gas_fees, targetChainId);
         }
-    }
-
-    public entry fun setFeeRecipient(
-        caller: &signer, feeRecipient: address
-    ) acquires GlobalManage {
-        assert!(
-            signer::address_of(caller) == @picwe, error::permission_denied(ENOT_OWNER)
-        );
-        let fee_recipient = &mut borrow_global_mut<GlobalManage>(@picwe).feeRecipient;
-        *fee_recipient = feeRecipient;
     }
 
     public entry fun addSupportedChain(

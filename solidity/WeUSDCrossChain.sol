@@ -7,6 +7,15 @@ import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./IPicweUSD.sol";
 import "./IWeUSDMintRedeem.sol";
 
+/**
+ * @notice Struct to store cross-chain request data
+ * @param requestId Unique identifier for the request
+ * @param localUser Address of the user on the local chain
+ * @param outerUser Address or identifier of the user on the remote chain
+ * @param amount Amount of WeUSD tokens involved in the request
+ * @param isburn Whether this is a burn request (true) or mint request (false)
+ * @param targetChainId Chain ID of the target chain for this request
+ */
 struct RequestData {
     uint256 requestId;
     address localUser;
@@ -16,95 +25,185 @@ struct RequestData {
     uint256 targetChainId;
 }
 
+/**
+ * @title WeUSDCrossChain
+ * @author WeUSD Protocol Team
+ * @notice Contract for managing cross-chain transfers of WeUSD tokens
+ * @dev This contract handles burning WeUSD on source chains and minting on target chains,
+ *      with integrated fee collection, gas fee management, and request tracking.
+ *      Uses role-based access control for administrative functions and cross-chain operations.
+ */
 contract WeUSDCrossChain is AccessControl {
+    /// @notice Role identifier for admin operations
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
+    /// @notice Role identifier for cross-chain minting operations
     bytes32 public constant CROSS_CHAIN_MINTER_ROLE = keccak256("CROSS_CHAIN_MINTER_ROLE");
-    IPicweUSD public weUSD;
+    
+    /// @notice WeUSD token contract (immutable after deployment)
+    IPicweUSD public immutable weUSD;
+    /// @notice WeUSD mint/redeem contract for reserve management
     IWeUSDMintRedeem public mintRedeem;
+    /// @notice Counter for generating unique request IDs
     uint256 public requestCount;
+    
+    /// @notice WeUSD token decimal places (immutable)
     uint8 public constant WEUSD_DECIMALS = 6;
+    /// @notice Salt value for request ID generation (immutable)
     uint256 public constant WEUSD_SALT = 2;
+    /// @notice Denominator for basis points calculations (immutable)
     uint256 public constant BASIS_POINTS_DENOMINATOR = 10000;
-    // 1%
+    /// @notice Maximum fee rate allowed (20% in basis points)
+    uint256 public constant MAX_FEE_RATE = 2000;
+    /// @notice Minimum fee rate allowed (0.01% in basis points)
+    uint256 public constant MIN_FEE_RATE = 1;
+    
+    /// @notice Current fee rate in basis points (1% = 100 basis points)
     uint256 private feeRateBasisPoints = 100;
+    /// @notice Default gas fee for cross-chain operations
     uint256 public gasfee = 1*10**(6-1);
+    /// @notice Address that receives transaction fees
     address public feeRecipient;
 
+    /// @notice Array of active source chain request IDs
     uint256[] public activeSourceRequests;
+    /// @notice Array of active target chain request IDs
     uint256[] public activeTargetRequests;
 
+    /// @notice Mapping of chain ID to specific gas fee for that chain
     mapping(uint256 => uint256) public chainGasFees;
+    /// @notice Mapping of request ID to request data
     mapping(uint256 => RequestData) private requests;
+    /// @notice Mapping of request ID to its index in activeSourceRequests array
     mapping(uint256 => uint256) public requestIdToSourceActiveIndex;
+    /// @notice Mapping of request ID to its index in activeTargetRequests array
     mapping(uint256 => uint256) public requestIdToTargetActiveIndex;
+    /// @notice Mapping of chain ID to whether it's supported for cross-chain operations
     mapping(uint256 => bool) public supportedChains;
 
+    /// @notice Emitted when WeUSD is burned for cross-chain transfer
+    /// @param requestId Unique identifier for the burn request
+    /// @param localUser Address of the user who initiated the burn
+    /// @param outerUser Target user address on the destination chain
+    /// @param sourceChainId Chain ID where the burn occurred
+    /// @param targetChainId Chain ID where tokens will be minted
+    /// @param amount Amount of WeUSD burned (after fees)
     event CrossChainBurn(uint256 indexed requestId, address indexed localUser, string outerUser, uint256 sourceChainId, uint256 targetChainId, uint256 amount);
+    
+    /// @notice Emitted when WeUSD is minted on target chain
+    /// @param requestId Unique identifier for the mint request
+    /// @param localUser Address of the user who received the minted tokens
+    /// @param outerUser Source user address on the origin chain
+    /// @param sourceChainId Chain ID where the burn occurred
+    /// @param targetChainId Chain ID where tokens were minted
+    /// @param amount Amount of WeUSD minted
     event CrossChainMint(uint256 indexed requestId, address indexed localUser, string outerUser, uint256 sourceChainId, uint256 targetChainId, uint256 amount);
+    
+    /// @notice Emitted when mint/redeem contract is updated
+    /// @param mintRedeemContract Address of the new mint/redeem contract
     event MintRedeemContractSet(address indexed mintRedeemContract);
+    
+    /// @notice Emitted when gas fee for a specific chain is set
+    /// @param targetChainId Chain ID for which the gas fee was set
+    /// @param gasfee New gas fee amount
     event ChainGasFeeSet(uint256 indexed targetChainId, uint256 gasfee);
+    
+    /// @notice Emitted when gas fee for a specific chain is removed
+    /// @param targetChainId Chain ID for which the gas fee was removed
     event ChainGasFeeRemoved(uint256 indexed targetChainId);
+    
+    /// @notice Emitted when fee rate is updated
+    /// @param feeRateBasisPoints New fee rate in basis points
     event FeeRateSet(uint256 feeRateBasisPoints);
+    
+    /// @notice Emitted when fee recipient is updated
+    /// @param newFeeRecipient New address to receive fees
+    event FeeRecipientSet(address newFeeRecipient);
+    
+    /// @notice Emitted when a chain is added to supported chains
+    /// @param targetChainId Chain ID that was added
     event SupportedChainAdded(uint256 indexed targetChainId);
+    
+    /// @notice Emitted when a chain is removed from supported chains
+    /// @param targetChainId Chain ID that was removed
     event SupportedChainRemoved(uint256 indexed targetChainId);
+    
+    /// @notice Emitted when a source request is archived and deleted
+    /// @param requestId Request ID that was archived
     event SourceRequestArchivedAndDeleted(uint256 indexed requestId);
+    
+    /// @notice Emitted when a target request is archived and deleted
+    /// @param requestId Request ID that was archived
     event TargetRequestArchivedAndDeleted(uint256 indexed requestId);
 
+    /**
+     * @notice Constructor to initialize the WeUSDCrossChain contract
+     * @dev Sets up initial roles and validates all input addresses
+     * @param _weUSD Address of the WeUSD token contract
+     * @param _crossChainMinter Address to be granted cross-chain minter role
+     * @param _feeRecipient Address to receive transaction fees
+     */
     constructor(address _weUSD, address _crossChainMinter, address _feeRecipient) {
+        // L-4 Fix: Add zero address checks
+        require(_weUSD != address(0), "WeUSD address cannot be zero");
+        require(_crossChainMinter != address(0), "Cross-chain minter cannot be zero");
+        require(_feeRecipient != address(0), "Fee recipient cannot be zero");
+
+        // Initialize immutable variables
         weUSD = IPicweUSD(_weUSD);
+        
+        // Initialize state variables
+        feeRecipient = _feeRecipient;
+        
+        // Set up role-based access control
         _grantRole(DEFAULT_ADMIN_ROLE, msg.sender);
         _grantRole(ADMIN_ROLE, msg.sender);
         _grantRole(CROSS_CHAIN_MINTER_ROLE, _crossChainMinter);
-        feeRecipient = _feeRecipient;
     }
 
     /**
-     * @dev Sets the mint redeem contract
-     * @param _mintRedeem The address of the WeUSDMintRedeem contract
+     * @notice Set the mint/redeem contract address for reserve management
+     * @dev Only admin can call this function. This contract manages stablecoin reserves.
+     * @param _mintRedeem Address of the WeUSDMintRedeem contract
      */
     function setMintRedeemContract(address _mintRedeem) external onlyRole(ADMIN_ROLE) {
+        require(_mintRedeem != address(0), "Mint redeem contract cannot be zero");
         mintRedeem = IWeUSDMintRedeem(_mintRedeem);
         emit MintRedeemContractSet(_mintRedeem);
     }
 
     /**
-     * @dev Sets the gas fee (gasfee).
-     * @param _gasfee The new gas fee amount.
-     * 
-     * @notice This function can only be called by users with the ADMIN_ROLE.
-     * @notice A GasFeeSet event will be triggered after successful setting.
+     * @notice Set the default gas fee for cross-chain operations
+     * @dev Only admin can call this function. This fee is charged for all cross-chain transfers.
+     * @param _gasfee New default gas fee amount in WeUSD units
      */
     function setGasfee(uint256 _gasfee) external onlyRole(ADMIN_ROLE) {
         gasfee = _gasfee;
     }
 
     /**
-     * @dev Sets the fee rate in basis points (e.g., 30 = 0.3%).
-     * @param _feeRateBasisPoints The new fee rate in basis points.
-     * 
-     * @notice This function can only be called by users with the ADMIN_ROLE.
-     * @notice A FeeRateSet event will be triggered after successful setting.
+     * @notice Set the percentage fee rate for cross-chain operations
+     * @dev Only admin can call this function. Fee is calculated as percentage of transfer amount.
+     * @param _feeRateBasisPoints New fee rate in basis points (100 = 1%)
      */
     function setFeeRateBasisPoints(uint256 _feeRateBasisPoints) external onlyRole(ADMIN_ROLE) {
+        require(_feeRateBasisPoints >= MIN_FEE_RATE && _feeRateBasisPoints <= MAX_FEE_RATE, "Invalid fee rate");
         feeRateBasisPoints = _feeRateBasisPoints;
         emit FeeRateSet(_feeRateBasisPoints);
     }
 
     /**
-     * @dev Gets the current fee rate in basis points.
-     * @return The current fee rate in basis points.
+     * @notice Get the current percentage fee rate
+     * @return Current fee rate in basis points
      */
     function getFeeRateBasisPoints() public view returns (uint256) {
         return feeRateBasisPoints;
     }
 
     /**
-     * @dev Sets the gas fee for a specific target chain.
-     * @param targetChainId The ID of the target chain.
-     * @param _gasfee The new gas fee amount for the target chain.
-     * 
-     * @notice This function can only be called by users with the ADMIN_ROLE.
-     * @notice A ChainGasFeeSet event will be triggered after successful setting.
+     * @notice Set gas fee for a specific target chain
+     * @dev Only admin can call this function. Overrides default gas fee for specific chains.
+     * @param targetChainId Chain ID for which to set the gas fee
+     * @param _gasfee Gas fee amount for the specified chain
      */
     function setChainGasfee(uint256 targetChainId, uint256 _gasfee) external onlyRole(ADMIN_ROLE) {
         chainGasFees[targetChainId] = _gasfee;
@@ -112,12 +211,9 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Removes the gas fee setting for a specific target chain.
-     * @param targetChainId The ID of the target chain.
-     * 
-     * @notice This function can only be called by users with the ADMIN_ROLE.
-     * @notice After removal, the default gas fee will be used for this chain.
-     * @notice A ChainGasFeeRemoved event will be triggered after successful removal.
+     * @notice Remove gas fee setting for a specific target chain
+     * @dev Only admin can call this function. Chain will use default gas fee after removal.
+     * @param targetChainId Chain ID for which to remove the custom gas fee
      */
     function removeChainGasfee(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
         delete chainGasFees[targetChainId];
@@ -125,9 +221,10 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Gets the gas fee for a specific target chain.
-     * @param targetChainId The ID of the target chain.
-     * @return The gas fee for the target chain, or the default gas fee if not set.
+     * @notice Get gas fee for a specific target chain
+     * @dev Returns chain-specific gas fee if set, otherwise returns default gas fee
+     * @param targetChainId Chain ID to query gas fee for
+     * @return Gas fee amount for the specified chain
      */
     function getChainGasfee(uint256 targetChainId) public view returns (uint256) {
         uint256 chainGasFee = chainGasFees[targetChainId];
@@ -135,70 +232,74 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Calculates the percentage fee for a given amount using the current fee rate
-     * @param amount The amount to calculate the fee on
-     * @return The calculated fee amount
+     * @notice Calculate percentage fee for a given amount
+     * @dev Uses current fee rate to calculate fee in basis points
+     * @param amount Amount to calculate fee for
+     * @return Calculated fee amount
      */
     function calculateFee(uint256 amount) public view returns (uint256) {
         return (amount * feeRateBasisPoints) / BASIS_POINTS_DENOMINATOR;
     }
 
     /**
-     * @dev Sets the fee recipient (feeRecipient).
-     * @param _feeRecipient The new fee recipient address.
-     * 
-     * @notice This function can only be called by users with the ADMIN_ROLE.
-     * @notice A FeeRecipientSet event will be triggered after successful setting.
+     * @notice Set the fee recipient address
+     * @dev Only admin can call this function. All cross-chain fees are sent to this address.
+     * @param _feeRecipient New address to receive fees
      */
     function setFeeRecipient(address _feeRecipient) external onlyRole(ADMIN_ROLE) {
+        require(_feeRecipient != address(0), "Fee recipient cannot be zero");
         feeRecipient = _feeRecipient;
+        emit FeeRecipientSet(_feeRecipient);
     }
 
     /**
-     * @dev Burns weUSD tokens on the source chain for cross-chain transfer.
-     * @param targetChainId The ID of the target chain where weUSD will be minted.
-     * @param amount The total amount of weUSD to be burned (including gas fee and percentage fee).
-     * @param outerUser The address or identifier of the user on the target chain to receive the minted weUSD.
-     *
-     * @notice This function can be called by any user.
-     * @notice A portion of the amount is deducted as gas fee and percentage fee and transferred to the fee recipient.
-     * @notice The remaining amount is burned from the sender's balance.
-     * @notice A CrossChainBurn event is emitted after successful burning.
+     * @notice Burn WeUSD tokens for cross-chain transfer
+     * @dev Burns tokens on source chain and reserves stablecoin for cross-chain operations.
+     *      Charges gas fee and percentage fee, then burns remaining amount.
+     * @param targetChainId Chain ID where WeUSD will be minted
+     * @param amount Total amount including fees to be processed
+     * @param outerUser Target user identifier on destination chain
      */
     function burnWeUSDCrossChain(uint256 targetChainId, uint256 amount, string memory outerUser) external {
         require(targetChainId != block.chainid, "Target chain must be different from source chain");
         require(supportedChains[targetChainId], "Unsupported target chain");
+        require(bytes(outerUser).length > 0, "Invalid outer user address");
+        
+        // Calculate fees
         uint256 currentGasFee = getChainGasfee(targetChainId);
         uint256 percentageFee = calculateFee(amount);
         uint256 totalFee = currentGasFee + percentageFee;
         
         require(amount > totalFee, "Amount must be greater than total fees");
-        require(bytes(outerUser).length > 0, "Invalid outer user address");
+        
+        // Generate unique request ID
         uint256 sourceChainId = block.chainid;
         uint256 requestId = (sourceChainId << 128) | (WEUSD_SALT << 64) | (++requestCount);
         require(!requestExists(requestId), "Request ID already exists");
+        
+        // Calculate burn amount after fees
         uint256 burnAmount = amount - totalFee;
+        
+        // Transfer fee to fee recipient
         require(weUSD.transferFrom(msg.sender, feeRecipient, totalFee), "Fee transfer failed");
+        
+        // Burn WeUSD tokens and reserve stablecoin
         weUSD.burnFrom(msg.sender, burnAmount);
         mintRedeem.reserveStablecoinForCrossChain(burnAmount);
+        
+        // Create request record and emit event
         _createRequest(requestId, msg.sender, outerUser, burnAmount, true, targetChainId);
         emit CrossChainBurn(requestId, msg.sender, outerUser, sourceChainId, targetChainId, burnAmount);
     }
 
     /**
-     * @dev Mints weUSD tokens on the target chain for cross-chain transfer.
+     * @notice Mint WeUSD tokens on target chain for cross-chain transfer
+     * @dev Only cross-chain minter can call this. Mints tokens and returns stablecoin to reserves.
      * @param requestId Unique request ID to prevent duplicate processing
-     * @param sourceChainId ID of the source chain
-     * @param amount Amount of weUSD to be minted
-     * @param localUser Address of the target user to receive the minted weUSD
-     * @param outerUser Address of the source user to receive the minted weUSD
-     *
-     * @notice This function can only be called by addresses with the CROSS_CHAIN_MINTER_ROLE role
-     * @notice The requestId must not have been used before
-     * @notice The source chain must be different from the current chain
-     * @notice The minting amount must be greater than 0
-     * @notice The local user address cannot be the zero address
-     * @notice A CrossChainMint event will be emitted after successful minting
+     * @param sourceChainId Chain ID where the burn occurred
+     * @param amount Amount of WeUSD to mint
+     * @param localUser Address to receive the minted WeUSD
+     * @param outerUser Source user identifier from origin chain
      */
     function mintWeUSDCrossChain(
         uint256 requestId, 
@@ -211,28 +312,25 @@ contract WeUSDCrossChain is AccessControl {
         require(amount > 0, "Amount must be greater than 0");
         require(localUser != address(0), "Invalid local user address");
         require(!requestExists(requestId), "Request ID already exists");
+        
+        // Mint WeUSD tokens and return stablecoin to reserves
         weUSD.mint(localUser, amount);
         mintRedeem.returnStablecoinFromCrossChain(amount);
+        
+        // Create request record and emit event
         _createRequest(requestId, localUser, outerUser, amount, false, block.chainid);
         emit CrossChainMint(requestId, localUser, outerUser, sourceChainId, block.chainid, amount);
     }
 
     /**
-    * @dev Batch mints weUSD tokens on the target chain for cross-chain transfer.
-    * @param requestIds Array of unique request IDs to prevent duplicate processing
-    * @param sourceChainIds Array of IDs of the source chains
-    * @param amounts Array of amounts of weUSD to be minted
-    * @param localUsers Array of addresses of the target users to receive the minted weUSD
-    * @param outerUsers Array of addresses of the source users to receive the minted weUSD
-    *
-    * @notice This function can only be called by addresses with the CROSS_CHAIN_MINTER_ROLE role
-    * @notice All input arrays must have the same length
-    * @notice Each requestId must not have been used before
-    * @notice Each source chain must be different from the current chain
-    * @notice Each minting amount must be greater than 0
-    * @notice Each local user address cannot be the zero address
-    * @notice A CrossChainMint event will be emitted for each successful minting
-    */
+     * @notice Batch mint WeUSD tokens for multiple cross-chain transfers
+     * @dev Only cross-chain minter can call this. Processes multiple mint requests atomically.
+     * @param requestIds Array of unique request IDs
+     * @param sourceChainIds Array of source chain IDs
+     * @param amounts Array of amounts to mint
+     * @param localUsers Array of addresses to receive minted WeUSD
+     * @param outerUsers Array of source user identifiers
+     */
     function batchMintWeUSDCrossChain(
         uint256[] calldata requestIds, 
         uint256[] calldata sourceChainIds, 
@@ -248,55 +346,57 @@ contract WeUSDCrossChain is AccessControl {
             "Input arrays must have the same length"
         );
 
+        // Validate all inputs first to ensure atomicity
         for (uint256 i = 0; i < requestIds.length; i++) {
             require(sourceChainIds[i] != block.chainid, "Source chain must be different from target chain");
             require(amounts[i] > 0, "Amount must be greater than 0");
             require(localUsers[i] != address(0), "Invalid local user address");
             require(!requestExists(requestIds[i]), "Request ID already exists");
+        }
+
+        // Execute all operations after validation
+        for (uint256 i = 0; i < requestIds.length; i++) {
+            // Mint WeUSD tokens and return stablecoin to reserves
             weUSD.mint(localUsers[i], amounts[i]);           
             mintRedeem.returnStablecoinFromCrossChain(amounts[i]);           
+            
+            // Create request record and emit event
             _createRequest(requestIds[i], localUsers[i], outerUsers[i], amounts[i], false, block.chainid);
             emit CrossChainMint(requestIds[i], localUsers[i], outerUsers[i], sourceChainIds[i], block.chainid, amounts[i]);
         }
     }
 
     /**
-     * @dev Gets the total number of cross-chain requests.
-     * @return The current requestCount.
+     * @notice Get total number of cross-chain requests processed
+     * @return Current request count
      */
     function getRequestCount() public view returns (uint256) {
         return requestCount;
     }    
     
     /**
-     * @dev Retrieves the request data for a given request ID
-     * @param _requestId The unique identifier of the request
-     * @return RequestData struct containing the request details
-     * 
-     * @notice This function can be called by any address
-     * @notice Returns a struct with default values if the request ID doesn't exist
+     * @notice Get request data by request ID
+     * @dev Returns empty struct if request doesn't exist
+     * @param _requestId Unique identifier of the request
+     * @return RequestData struct containing request details
      */
     function getRequestById(uint256 _requestId) public view returns (RequestData memory) {
         return requests[_requestId];
     }
 
     /**
-     * @dev Checks if a request exists for a given request ID
-     * @param _requestId The unique identifier of the request
-     * @return bool indicating whether the request exists
-     * 
-     * @notice This function can be called by any address
+     * @notice Check if a request exists
+     * @param _requestId Unique identifier of the request
+     * @return True if request exists, false otherwise
      */
     function requestExists(uint256 _requestId) public view returns (bool) {
         return requests[_requestId].requestId != 0;
     }
     
     /**
-     * @dev Checks if multiple requests exist for a given list of request IDs
-     * @param _requestIds An array of unique identifiers of the requests
-     * @return bool[] An array of booleans indicating whether each corresponding request exists
-     * 
-     * @notice This function can be called by any address
+     * @notice Check if multiple requests exist
+     * @param _requestIds Array of request IDs to check
+     * @return Array of boolean values indicating existence of each request
      */
     function batchRequestExists(uint256[] calldata _requestIds) public view returns (bool[] memory) {
         uint256 len = _requestIds.length;
@@ -308,12 +408,10 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Retrieves the request data for a given request count
-     * @param count The count number of the request
-     * @return RequestData struct containing the request details
-     * 
-     * @notice This function can be called by any address
-     * @notice Reverts if the count is invalid or the request doesn't exist
+     * @notice Get request data by count number
+     * @dev Reconstructs request ID from count and retrieves data
+     * @param count Count number of the request (1-based)
+     * @return RequestData struct containing request details
      */
     function getRequestByCount(uint256 count) public view returns (RequestData memory) {
         require(count > 0 && count <= requestCount, "Invalid count");
@@ -326,16 +424,11 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Retrieves multiple requests starting from a specific count
-     * @param startCount The starting count number
-     * @param page Page number (starting from 1)
-     * @param pageSize Number of items per page
-     * @return RequestData[] Array of request data for the specified range
-     * @return uint256 Total number of records available from startCount
-     * 
-     * @notice This function can be called by any address
-     * @notice If page or pageSize is 0, all requests from startCount will be returned
-     * @notice Returns an empty array if no records are found in the specified range
+     * @notice Get multiple requests starting from a specific count with pagination
+     * @param startCount Starting count number (1-based)
+     * @param page Page number (1-based, 0 means no pagination)
+     * @param pageSize Number of items per page (0 means no pagination)
+     * @return Array of RequestData and total number of available records
      */
     function getRequestsFromCount(
         uint256 startCount,
@@ -350,6 +443,7 @@ contract WeUSDCrossChain is AccessControl {
         uint256 startIndex = 0;
         uint256 endIndex = totalRecords;
 
+        // Apply pagination if specified
         if (page > 0 && pageSize > 0) {
             startIndex = (page - 1) * pageSize;
             if (startIndex >= totalRecords) {
@@ -359,6 +453,7 @@ contract WeUSDCrossChain is AccessControl {
             endIndex = Math.min(startIndex + pageSize, totalRecords);
         }
 
+        // Build result array
         RequestData[] memory requestDataArray = new RequestData[](endIndex - startIndex);
         for (uint256 i = 0; i < (endIndex - startIndex); i++) {
             uint256 currentCount = startCount + (startIndex + i);
@@ -372,20 +467,16 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Get all source chain request IDs for a specific user
-     * @param _user User address
-     * @param _page Page number (starting from 1)
-     * @param _pageSize Number of items per page
-     * @return uint256[] Array containing source chain request IDs for the user's specified page
-     * @return uint256 Total number of source chain requests for the user
-     * 
-     * @notice This function can be called by any address
-     * @notice If the user has no source chain requests, an empty array will be returned
-     * @notice If _page or _pageSize is 0, all requests will be returned
+     * @notice Get source chain requests for a specific user with pagination
+     * @param _user User address to query
+     * @param _page Page number (1-based, 0 means no pagination)
+     * @param _pageSize Number of items per page (0 means no pagination)
+     * @return Array of source request IDs and total count for the user
      */
     function getUserSourceRequests(address _user, uint256 _page, uint256 _pageSize) public view returns (uint256[] memory, uint256) {
         require((_page == 0 && _pageSize == 0) || (_page > 0 && _pageSize > 0), "Invalid page or page size");
 
+        // Count total requests for user
         uint256 totalRequests = 0;
         for (uint256 i = 0; i < activeSourceRequests.length; i++) {
             if (requests[activeSourceRequests[i]].localUser == _user) {
@@ -393,6 +484,7 @@ contract WeUSDCrossChain is AccessControl {
             }
         }
 
+        // Calculate pagination bounds
         uint256 startIndex = 0;
         uint256 endIndex = totalRequests;
 
@@ -403,6 +495,7 @@ contract WeUSDCrossChain is AccessControl {
             if (endIndex > totalRequests) endIndex = totalRequests;
         }
 
+        // Build result array (newest first)
         uint256[] memory userSourceRequests = new uint256[](endIndex - startIndex);
         uint256 count = 0;
 
@@ -422,20 +515,16 @@ contract WeUSDCrossChain is AccessControl {
     }
 
     /**
-     * @dev Get all target chain request IDs for a specific user
-     * @param _user User address
-     * @param _page Page number (starting from 1)
-     * @param _pageSize Number of items per page
-     * @return uint256[] Array containing target chain request IDs for the user's specified page
-     * @return uint256 Total number of target chain requests for the user
-     * 
-     * @notice Any address can call this function
-     * @notice If the user has no target chain requests, an empty array will be returned
-     * @notice If _page or _pageSize is 0, all requests will be returned
+     * @notice Get target chain requests for a specific user with pagination
+     * @param _user User address to query
+     * @param _page Page number (1-based, 0 means no pagination)
+     * @param _pageSize Number of items per page (0 means no pagination)
+     * @return Array of target request IDs and total count for the user
      */
     function getUserTargetRequests(address _user, uint256 _page, uint256 _pageSize) public view returns (uint256[] memory, uint256) {
         require((_page == 0 && _pageSize == 0) || (_page > 0 && _pageSize > 0), "Invalid page or page size");
 
+        // Count total requests for user
         uint256 totalRequests = 0;
         for (uint256 i = 0; i < activeTargetRequests.length; i++) {
             if (requests[activeTargetRequests[i]].localUser == _user) {
@@ -443,6 +532,7 @@ contract WeUSDCrossChain is AccessControl {
             }
         }
 
+        // Calculate pagination bounds
         uint256 startIndex = 0;
         uint256 endIndex = totalRequests;
 
@@ -453,6 +543,7 @@ contract WeUSDCrossChain is AccessControl {
             if (endIndex > totalRequests) endIndex = totalRequests;
         }
 
+        // Build result array (newest first)
         uint256[] memory userTargetRequests = new uint256[](endIndex - startIndex);
         uint256 count = 0;
 
@@ -471,8 +562,127 @@ contract WeUSDCrossChain is AccessControl {
         return (userTargetRequests, totalRequests);
     }
 
-    // internal functions
-    function _createRequest(uint256 _requestId, address _localUser, string memory _outerUser, uint256 _amount, bool _isburn, uint256 _targetChainId) internal {
+    /**
+     * @notice Add a chain to the list of supported chains
+     * @dev Only admin can call this function
+     * @param targetChainId Chain ID to add to supported chains
+     */
+    function addSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
+        supportedChains[targetChainId] = true;
+        emit SupportedChainAdded(targetChainId);
+    }
+
+    /**
+     * @notice Remove a chain from the list of supported chains
+     * @dev Only admin can call this function
+     * @param targetChainId Chain ID to remove from supported chains
+     */
+    function removeSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
+        supportedChains[targetChainId] = false;
+        emit SupportedChainRemoved(targetChainId);
+    }
+
+    /**
+     * @notice Archive and delete a source request
+     * @dev Only admin can call this function. Permanently removes request data.
+     * @param requestId Request ID to archive and delete
+     */
+    function archiveAndDeleteSourceRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
+        uint256 idx = requestIdToSourceActiveIndex[requestId];
+        require(activeSourceRequests.length > idx && activeSourceRequests[idx] == requestId, "Invalid requestId");
+        
+        // Swap with last element and pop (gas efficient removal)
+        uint256 lastIndex = activeSourceRequests.length - 1;
+        if (idx != lastIndex) {
+            uint256 lastId = activeSourceRequests[lastIndex];
+            activeSourceRequests[idx] = lastId;
+            requestIdToSourceActiveIndex[lastId] = idx;
+        }
+        
+        // Remove from arrays and mappings
+        activeSourceRequests.pop();
+        delete requestIdToSourceActiveIndex[requestId];
+        delete requests[requestId];
+        
+        emit SourceRequestArchivedAndDeleted(requestId);
+    }
+
+    /**
+     * @notice Archive and delete a target request
+     * @dev Only admin can call this function. Permanently removes request data.
+     * @param requestId Request ID to archive and delete
+     */
+    function archiveAndDeleteTargetRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
+        uint256 idx = requestIdToTargetActiveIndex[requestId];
+        require(activeTargetRequests.length > idx && activeTargetRequests[idx] == requestId, "Invalid requestId");
+        
+        // Swap with last element and pop (gas efficient removal)
+        uint256 lastIndex = activeTargetRequests.length - 1;
+        if (idx != lastIndex) {
+            uint256 lastId = activeTargetRequests[lastIndex];
+            activeTargetRequests[idx] = lastId;
+            requestIdToTargetActiveIndex[lastId] = idx;
+        }
+        
+        // Remove from arrays and mappings
+        activeTargetRequests.pop();
+        delete requestIdToTargetActiveIndex[requestId];
+        delete requests[requestId];
+        
+        emit TargetRequestArchivedAndDeleted(requestId);
+    }
+
+    /**
+     * @notice Batch archive and delete multiple source requests
+     * @dev Only admin can call this function. Processes multiple requests efficiently.
+     * @param requestIds Array of request IDs to archive and delete
+     */
+    function batchArchiveAndDeleteSourceRequests(uint256[] calldata requestIds) external onlyRole(ADMIN_ROLE) {
+        for (uint256 i = 0; i < requestIds.length; i++) {
+            uint256 requestId = requestIds[i];
+            // Check if request exists and is valid before attempting deletion
+            if (requestIdToSourceActiveIndex[requestId] < activeSourceRequests.length && 
+                activeSourceRequests[requestIdToSourceActiveIndex[requestId]] == requestId) {
+                archiveAndDeleteSourceRequest(requestId);
+            }
+        }
+    }
+
+    /**
+     * @notice Batch archive and delete multiple target requests
+     * @dev Only admin can call this function. Processes multiple requests efficiently.
+     * @param requestIds Array of request IDs to archive and delete
+     */
+    function batchArchiveAndDeleteTargetRequests(uint256[] calldata requestIds) external onlyRole(ADMIN_ROLE) {
+        for (uint256 i = 0; i < requestIds.length; i++) {
+            uint256 requestId = requestIds[i];
+            // Check if request exists and is valid before attempting deletion
+            if (requestIdToTargetActiveIndex[requestId] < activeTargetRequests.length && 
+                activeTargetRequests[requestIdToTargetActiveIndex[requestId]] == requestId) {
+                archiveAndDeleteTargetRequest(requestId);
+            }
+        }
+    }
+
+    /**
+     * @notice Internal function to create and store request data
+     * @dev Creates request record and adds to appropriate tracking arrays
+     * @param _requestId Unique identifier for the request
+     * @param _localUser Address of the local user
+     * @param _outerUser Identifier of the remote user
+     * @param _amount Amount involved in the request
+     * @param _isburn Whether this is a burn (true) or mint (false) request
+     * @param _targetChainId Target chain ID for the request
+     */
+    function _createRequest(
+        uint256 _requestId, 
+        address _localUser, 
+        string memory _outerUser, 
+        uint256 _amount, 
+        bool _isburn, 
+        uint256 _targetChainId
+    ) internal {
+        // Create request data structure
         RequestData memory newRequest = RequestData({
             requestId: _requestId,
             localUser: _localUser,
@@ -482,100 +692,16 @@ contract WeUSDCrossChain is AccessControl {
             targetChainId: _targetChainId
         });
         
+        // Store request data
         requests[_requestId] = newRequest;
+        
+        // Add to appropriate tracking array and index mapping
         if(_isburn){
             activeSourceRequests.push(_requestId);
-        }else{
-            activeTargetRequests.push(_requestId);
-        }
-        if(_isburn){
             requestIdToSourceActiveIndex[_requestId] = activeSourceRequests.length - 1;
-        }else{
+        } else {
+            activeTargetRequests.push(_requestId);
             requestIdToTargetActiveIndex[_requestId] = activeTargetRequests.length - 1;
-        }
-    }
-
-    function addSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
-        supportedChains[targetChainId] = true;
-        emit SupportedChainAdded(targetChainId);
-    }
-
-    function removeSupportedChain(uint256 targetChainId) external onlyRole(ADMIN_ROLE) {
-        supportedChains[targetChainId] = false;
-        emit SupportedChainRemoved(targetChainId);
-    }
-
-    /**
-     * @dev Archive and completely delete source request
-     * @param requestId The requestId to archive
-     */
-    function archiveAndDeleteSourceRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
-        uint256 idx = requestIdToSourceActiveIndex[requestId];
-        require(activeSourceRequests.length > idx && activeSourceRequests[idx] == requestId, "Invalid requestId");
-        
-        // swap and pop
-        uint256 lastIndex = activeSourceRequests.length - 1;
-        if (idx != lastIndex) {
-            // Only swap if the element to delete is not the last element
-            uint256 lastId = activeSourceRequests[lastIndex];
-            activeSourceRequests[idx] = lastId;
-            requestIdToSourceActiveIndex[lastId] = idx;
-        }
-        
-        activeSourceRequests.pop();
-        delete requestIdToSourceActiveIndex[requestId];
-        // Delete main data
-        delete requests[requestId];
-        emit SourceRequestArchivedAndDeleted(requestId);
-    }
-
-    /**
-     * @dev Archive and completely delete target request
-     * @param requestId The requestId to archive
-     */
-    function archiveAndDeleteTargetRequest(uint256 requestId) public onlyRole(ADMIN_ROLE) {
-        uint256 idx = requestIdToTargetActiveIndex[requestId];
-        require(activeTargetRequests.length > idx && activeTargetRequests[idx] == requestId, "Invalid requestId");
-        
-        // swap and pop
-        uint256 lastIndex = activeTargetRequests.length - 1;
-        if (idx != lastIndex) {
-            // Only swap if the element to delete is not the last element
-            uint256 lastId = activeTargetRequests[lastIndex];
-            activeTargetRequests[idx] = lastId;
-            requestIdToTargetActiveIndex[lastId] = idx;
-        }
-        
-        activeTargetRequests.pop();
-        delete requestIdToTargetActiveIndex[requestId];
-        // Delete main data
-        delete requests[requestId];
-        emit TargetRequestArchivedAndDeleted(requestId);
-    }
-
-    /**
-     * @dev Batch archive and completely delete source requests
-     * @param requestIds Array of requestIds to archive
-     */
-    function batchArchiveAndDeleteSourceRequests(uint256[] calldata requestIds) external onlyRole(ADMIN_ROLE) {
-        for (uint256 i = 0; i < requestIds.length; i++) {
-            uint256 requestId = requestIds[i];
-            if (requestIdToSourceActiveIndex[requestId] < activeSourceRequests.length && activeSourceRequests[requestIdToSourceActiveIndex[requestId]] == requestId) {
-                archiveAndDeleteSourceRequest(requestId);
-            }
-        }
-    }
-
-    /**
-     * @dev Batch archive and completely delete target requests
-     * @param requestIds Array of requestIds to archive
-     */
-    function batchArchiveAndDeleteTargetRequests(uint256[] calldata requestIds) external onlyRole(ADMIN_ROLE) {
-        for (uint256 i = 0; i < requestIds.length; i++) {
-            uint256 requestId = requestIds[i];
-            if (requestIdToTargetActiveIndex[requestId] < activeTargetRequests.length && activeTargetRequests[requestIdToTargetActiveIndex[requestId]] == requestId) {
-                archiveAndDeleteTargetRequest(requestId);
-            }
         }
     }
 }

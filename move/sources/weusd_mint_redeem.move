@@ -9,15 +9,18 @@ module picwe::weusd_mint_redeem {
 
     use picwe::weusd;
 
-
-
-
-
+    // Friend module that can access internal functions
     friend picwe::weusd_cross_chain_gas;
 
+    // Token precision constants
     const WEUSD_DECIMALS: u8 = 6;
     const STABLECOIN_DECIMALS: u8 = 6;
     
+    // Minimum and maximum amount limits (in WeUSD units)
+    const MIN_AMOUNT_LIMIT: u64 = 1_000; // 0.001 WeUSD minimum
+    const MAX_AMOUNT_LIMIT: u64 = 1_000_000_000; // 1,000 WeUSD maximum
+    
+    // Error codes
     const E_INSUFFICIENT_FEE: u64 = 1003;
     const E_INSUFFICIENT_RESERVES: u64 = 1004;
     const E_INSUFFICIENT_AMOUNT: u64 = 1006;
@@ -25,11 +28,15 @@ module picwe::weusd_mint_redeem {
     const E_NOT_AUTHORIZED: u64 = 1013;
     const E_INVALID_FEE_RATIO: u64 = 1014;
     const E_INVALID_PARAMETER: u64 = 1015;
+    const E_ZERO_ADDRESS: u64 = 1016;
+    const E_INVALID_AMOUNT_RANGE: u64 = 1017;
 
+    // Contract addresses
     const STABLECOIN_ADDRESS: address = @stablecoin_metadata_address;
     const BALANCER_ADDRESS: address = @balancer_address;
     const RESOURCE_ACCOUNT_SEED: vector<u8> = b"PICWE_RESOURCE_ACCOUNT";
 
+    // Event emitted when WeUSD is minted
     #[event]
     struct MintedWeUSD has drop, store {
         user: address,
@@ -38,6 +45,7 @@ module picwe::weusd_mint_redeem {
         fee: u64
     }
 
+    // Event emitted when WeUSD is burned/redeemed
     #[event]
     struct BurnedWeUSD has drop, store {
         user: address,
@@ -46,6 +54,7 @@ module picwe::weusd_mint_redeem {
         fee: u64
     }
 
+    // Main state structure containing all contract parameters
     struct MintState has key {
         fee_recipient: address,
         fee_ratio: u64,  // Fee rate, base 10000
@@ -59,15 +68,18 @@ module picwe::weusd_mint_redeem {
         stablecoin_decimals: u8
     }
 
+    // Structure to track accumulated fees
     struct AccumulatedFees has store {
         stablecoin_fees: u64
     }
 
+    // Event handles for emitting events
     struct EventHandles has key {
         minted_weusd_events: event::EventHandle<MintedWeUSD>,
         burned_weusd_events: event::EventHandle<BurnedWeUSD>,
     }
 
+    // Initialize the module with default parameters
     fun init_module(sender: &signer) {
         let (_, resource_signer_cap) = account::create_resource_account(sender, RESOURCE_ACCOUNT_SEED);
         move_to(sender, MintState {
@@ -90,18 +102,19 @@ module picwe::weusd_mint_redeem {
         });
     }
 
-    // Get USDT token metadata
+    // Get USDT token metadata object
     fun get_usdt_metadata(): Object<Metadata> acquires MintState {
         let mint_state = borrow_global<MintState>(@picwe);
         object::address_to_object<Metadata>(mint_state.stablecoin_address)
     }
 
-    // Get resource account signer
+    // Get resource account signer for internal operations
     public(friend) fun get_resource_signer(): signer acquires MintState {
         account::create_signer_with_capability(&borrow_global<MintState>(@picwe).resource_signer_cap)
     }
     
-    // Precision conversion utility functions using u128 and math128::pow
+    // Convert WeUSD amount to stablecoin amount (round down)
+    // Used for redeem operations to avoid giving more than deserved
     fun to_stablecoin_amount_down(weusd_amount: u64): u64 {
         let amt128 = (weusd_amount as u128);
         let sc128 = if (STABLECOIN_DECIMALS == WEUSD_DECIMALS) {
@@ -117,7 +130,8 @@ module picwe::weusd_mint_redeem {
         (sc128 as u64)
     }
     
-    // Precision conversion utility functions using u128 and math128::pow
+    // Convert WeUSD amount to stablecoin amount (round up)
+    // Used for mint operations to ensure sufficient collateral
     fun to_stablecoin_amount_up(weusd_amount: u64): u64 {
         let amt128 = (weusd_amount as u128);
         let sc128 = if (STABLECOIN_DECIMALS == WEUSD_DECIMALS) {
@@ -129,12 +143,15 @@ module picwe::weusd_mint_redeem {
             let exp: u128 = ((WEUSD_DECIMALS - STABLECOIN_DECIMALS) as u128);
             let divisor = math128::pow(10, exp);
             let tmp = amt128 / divisor;
+            // Only round up if there's a remainder
             if (amt128 % divisor > 0) { tmp + 1 } else { tmp }
         };
         (sc128 as u64)
     }
 
-    // Mint WeUSD tokens
+    // Mint WeUSD tokens by depositing stablecoin
+    // @param sender: The account minting WeUSD
+    // @param weusd_amount: Amount of WeUSD to mint
     public entry fun mintWeUSD(
         sender: &signer,
         weusd_amount: u64
@@ -143,9 +160,13 @@ module picwe::weusd_mint_redeem {
         let resource_signer = get_resource_signer();
         let stablecoin_metadata = get_usdt_metadata();
         let mint_state = borrow_global_mut<MintState>(@picwe);
+        
+        // Validate minimum amount requirement
         assert!(weusd_amount >= mint_state.min_amount, E_INSUFFICIENT_AMOUNT);
+        
         let resource_account = signer::address_of(&resource_signer);
         let sc_mint_amount = to_stablecoin_amount_up(weusd_amount);
+        
         // Transfer USDT from sender to resource account
         primary_fungible_store::transfer(
             sender,
@@ -153,10 +174,14 @@ module picwe::weusd_mint_redeem {
             resource_account,
             sc_mint_amount
         );
+        
         // Update reserves
         mint_state.stablecoin_reserves = mint_state.stablecoin_reserves + sc_mint_amount;
+        
         // Mint WeUSD tokens
         weusd::mint(sender_addr, weusd_amount);
+        
+        // Emit mint event
         event::emit_event(
             &mut borrow_global_mut<EventHandles>(@picwe).minted_weusd_events,
             MintedWeUSD {
@@ -168,7 +193,9 @@ module picwe::weusd_mint_redeem {
         );
     }
     
-    // Redeem WeUSD tokens
+    // Redeem WeUSD tokens for stablecoin (with fee)
+    // @param sender: The account redeeming WeUSD
+    // @param weusd_amount: Amount of WeUSD to redeem
     public entry fun redeemWeUSD(
         sender: &signer,
         weusd_amount: u64
@@ -177,14 +204,20 @@ module picwe::weusd_mint_redeem {
         let resource_signer = get_resource_signer();
         let stablecoin_metadata = get_usdt_metadata();
         let mint_state = borrow_global_mut<MintState>(@picwe);
+        
+        // Validate minimum amount requirement
         assert!(weusd_amount >= mint_state.min_amount, E_INSUFFICIENT_AMOUNT);
+        
         let sc_redeem_amount = to_stablecoin_amount_down(weusd_amount);
         assert!(mint_state.stablecoin_reserves >= sc_redeem_amount, E_INSUFFICIENT_RESERVES);
+        
         // Calculate fee
         let fee = (sc_redeem_amount * mint_state.fee_ratio) / 10000;
         let actual_sc = sc_redeem_amount - fee;
         assert!(actual_sc > 0, E_ZERO_AMOUNT);
+        
         let fee_recipient = mint_state.fee_recipient;
+        
         // Transfer USDT to recipient
         primary_fungible_store::transfer(
             &resource_signer,
@@ -192,6 +225,7 @@ module picwe::weusd_mint_redeem {
             recipient,
             actual_sc
         );
+        
         // Transfer fee to fee recipient
         primary_fungible_store::transfer(
             &resource_signer,
@@ -199,12 +233,17 @@ module picwe::weusd_mint_redeem {
             fee_recipient,
             fee
         );
+        
         // Update reserves
         mint_state.stablecoin_reserves = mint_state.stablecoin_reserves - sc_redeem_amount;
+        
         // Burn WEUSD
         weusd::burn(recipient, weusd_amount);
+        
         // Update accumulated fees
         mint_state.accumulated_fees.stablecoin_fees = mint_state.accumulated_fees.stablecoin_fees + fee;
+        
+        // Emit burn event
         event::emit_event(
             &mut borrow_global_mut<EventHandles>(@picwe).burned_weusd_events,
             BurnedWeUSD {
@@ -216,7 +255,9 @@ module picwe::weusd_mint_redeem {
         );
     }
 
-    // Set fee ratio
+    // Set fee ratio (only contract owner)
+    // @param sender: Must be contract owner
+    // @param new_fee_ratio: New fee ratio in basis points (0.1% to 20%)
     public entry fun set_fee_ratio(
         sender: &signer, 
         new_fee_ratio: u64
@@ -227,22 +268,30 @@ module picwe::weusd_mint_redeem {
         mint_state.fee_ratio = new_fee_ratio;
     }
 
-    // Set minimum mint amount
+    // Set minimum mint/redeem amount with validation
+    // @param sender: Must be authorized setter
+    // @param new_min_amount: New minimum amount (must be within reasonable range)
     public entry fun set_min_amount(
         sender: &signer,
         new_min_amount: u64
     ) acquires MintState {
         assert!(signer::address_of(sender) == @setter, E_NOT_AUTHORIZED);
+        // Validate amount is within reasonable range
+        assert!(new_min_amount >= MIN_AMOUNT_LIMIT && new_min_amount <= MAX_AMOUNT_LIMIT, E_INVALID_AMOUNT_RANGE);
         let mint_state = borrow_global_mut<MintState>(@picwe);
         mint_state.min_amount = new_min_amount;
     }
 
-    // Set fee recipient
+    // Set fee recipient address with zero address check
+    // @param sender: Must be authorized setter
+    // @param new_fee_recipient: New fee recipient address (cannot be zero)
     public entry fun set_fee_recipient(
         sender: &signer,
         new_fee_recipient: address
     ) acquires MintState {
         assert!(signer::address_of(sender) == @setter, E_NOT_AUTHORIZED);
+        // Check for zero address
+        assert!(new_fee_recipient != @0x0, E_ZERO_ADDRESS);
         let mint_state = borrow_global_mut<MintState>(@picwe);
         mint_state.fee_recipient = new_fee_recipient;
     }
@@ -261,6 +310,7 @@ module picwe::weusd_mint_redeem {
         mint_state.stablecoin_reserves
     }
 
+    // Query mint state fields
     #[view]
     public fun get_mint_state_fields(): (address, u64, u64) acquires MintState {
         let mint_state = borrow_global<MintState>(@picwe);
@@ -271,11 +321,13 @@ module picwe::weusd_mint_redeem {
         )
     }
 
-    // Function to handle cross-chain USDT reserves
+    // Reserve stablecoin for cross-chain operations
+    // Handles deficit repayment logic
     public(friend) fun reserve_stablecoin_for_cross_chain(
         amount: u64
     ) acquires MintState {
         let mint_state = borrow_global_mut<MintState>(@picwe);
+        
         // Calculate the net amount that needs to be deducted from the reserves
         let to_reserve = if (mint_state.cross_chain_deficit > 0) {
             let repay = if (amount <= mint_state.cross_chain_deficit) {
@@ -288,16 +340,20 @@ module picwe::weusd_mint_redeem {
         } else {
             amount
         };
+        
         assert!(mint_state.stablecoin_reserves >= to_reserve, E_INSUFFICIENT_RESERVES);
+        
         // Deduct only the actual amount to be reserved
         mint_state.stablecoin_reserves = mint_state.stablecoin_reserves - to_reserve;
+        
         // Add the remaining amount to the cross-chain reserves
         if (to_reserve > 0) {
             mint_state.cross_chain_reserves = mint_state.cross_chain_reserves + to_reserve;
         };
     }
 
-    // Function to handle cross-chain USDT return
+    // Return stablecoin from cross-chain operations
+    // Handles deficit tracking when insufficient reserves
     public(friend) fun return_stablecoin_from_cross_chain(
         amount: u64
     ) acquires MintState {
@@ -316,7 +372,10 @@ module picwe::weusd_mint_redeem {
         }
     }
 
-    // Function for project to withdraw cross-chain reserves
+    // Withdraw cross-chain reserves to specified recipient
+    // @param sender: Must be authorized (contract owner or balancer)
+    // @param amount: Amount to withdraw
+    // @param recipient: Recipient address (cannot be zero)
     public entry fun withdraw_cross_chain_reserves(
         sender: &signer,
         amount: u64,
@@ -324,6 +383,8 @@ module picwe::weusd_mint_redeem {
     ) acquires MintState {
         let sender_addr = signer::address_of(sender);
         assert!(sender_addr == @picwe || sender_addr == BALANCER_ADDRESS, E_NOT_AUTHORIZED);
+        // Check for zero address
+        assert!(recipient != @0x0, E_ZERO_ADDRESS);
         
         // Get resource signer first
         let resource_signer = get_resource_signer();        
@@ -344,7 +405,9 @@ module picwe::weusd_mint_redeem {
         mint_state.cross_chain_reserves = mint_state.cross_chain_reserves - amount;
     }
 
-    // Function to withdraw cross-chain reserves to balancer address
+    // Withdraw cross-chain reserves to balancer address
+    // @param sender: Must be authorized (contract owner or balancer)
+    // @param amount: Amount to withdraw
     public entry fun withdraw_cross_chain_reserves_to_balancer(
         sender: &signer,
         amount: u64
@@ -366,6 +429,23 @@ module picwe::weusd_mint_redeem {
     public fun get_cross_chain_deficit(): u64 acquires MintState {
         let mint_state = borrow_global<MintState>(@picwe);
         mint_state.cross_chain_deficit
+    }
+
+    // Set stablecoin address and decimals with validation
+    // @param sender: Must be contract owner
+    // @param new_stablecoin_address: New stablecoin address (cannot be zero)
+    // @param new_stablecoin_decimals: New stablecoin decimals
+    public entry fun set_stablecoin(
+        sender: &signer,
+        new_stablecoin_address: address,
+        new_stablecoin_decimals: u8
+    ) acquires MintState {
+        assert!(signer::address_of(sender) == @picwe, E_NOT_AUTHORIZED);
+        // Check for zero address
+        assert!(new_stablecoin_address != @0x0, E_ZERO_ADDRESS);
+        let mint_state = borrow_global_mut<MintState>(@picwe);
+        mint_state.stablecoin_address = new_stablecoin_address;
+        mint_state.stablecoin_decimals = new_stablecoin_decimals;
     }
     
     #[test_only]
@@ -645,17 +725,5 @@ module picwe::weusd_mint_redeem {
         // Verify that the main reserves increased by the cross-chain reserve amount (not the full return amount)
         let expected_reserves = mint_amount; // Initial reserves should be preserved and the cross-chain reserves returned
         assert!(get_total_reserves() == expected_reserves, E_INVALID_PARAMETER);
-    }
-
-    /// Dynamically set the stablecoin address and its decimals
-    public entry fun set_stablecoin(
-        sender: &signer,
-        new_stablecoin_address: address,
-        new_stablecoin_decimals: u8
-    ) acquires MintState {
-        assert!(signer::address_of(sender) == @picwe, E_NOT_AUTHORIZED);
-        let mint_state = borrow_global_mut<MintState>(@picwe);
-        mint_state.stablecoin_address = new_stablecoin_address;
-        mint_state.stablecoin_decimals = new_stablecoin_decimals;
     }
 }

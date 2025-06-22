@@ -1,0 +1,5 @@
+# 忽略 .deps 目录
+.deps/
+solidity/artifacts
+audit-report/
+.cursor/
