@@ -30,6 +30,7 @@ module picwe::weusd_mint_redeem {
     const E_INVALID_PARAMETER: u64 = 1015;
     const E_ZERO_ADDRESS: u64 = 1016;
     const E_INVALID_AMOUNT_RANGE: u64 = 1017;
+    const E_MUST_HANDLE_RESERVES_FIRST: u64 = 1018;
 
     // Contract addresses
     const STABLECOIN_ADDRESS: address = @stablecoin_metadata_address;
@@ -442,8 +443,25 @@ module picwe::weusd_mint_redeem {
         let mint_state = borrow_global<MintState>(@picwe);
         mint_state.cross_chain_deficit
     }
+    
+    // Check if contract is ready for stablecoin changes
+    // Returns (ready, stablecoin_reserves, cross_chain_reserves, cross_chain_deficit, accumulated_fees)
+    #[view]
+    public fun is_ready_for_contract_changes(): (bool, u64, u64, u64, u64) acquires MintState {
+        let mint_state = borrow_global<MintState>(@picwe);
+        let ready = mint_state.stablecoin_reserves == 0 && 
+                   mint_state.cross_chain_reserves == 0 && 
+                   mint_state.cross_chain_deficit == 0 && 
+                   mint_state.accumulated_fees.stablecoin_fees == 0;
+        (ready, 
+         mint_state.stablecoin_reserves, 
+         mint_state.cross_chain_reserves, 
+         mint_state.cross_chain_deficit, 
+         mint_state.accumulated_fees.stablecoin_fees)
+    }
 
     // Set stablecoin address and decimals with validation
+    // WUS1-1 Fix: Requires manual handling of existing reserves to prevent inconsistency
     // @param sender: Must be contract owner
     // @param new_stablecoin_address: New stablecoin address (cannot be zero)
     // @param new_stablecoin_decimals: New stablecoin decimals
@@ -456,6 +474,13 @@ module picwe::weusd_mint_redeem {
         // Check for zero address
         assert!(new_stablecoin_address != @0x0, E_ZERO_ADDRESS);
         let mint_state = borrow_global_mut<MintState>(@picwe);
+        
+        // WUS1-1 Fix: Warning - Admin must manually handle existing reserves before changing stablecoin
+        assert!(mint_state.stablecoin_reserves == 0, E_MUST_HANDLE_RESERVES_FIRST);
+        assert!(mint_state.cross_chain_reserves == 0, E_MUST_HANDLE_RESERVES_FIRST);
+        assert!(mint_state.cross_chain_deficit == 0, E_MUST_HANDLE_RESERVES_FIRST);
+        assert!(mint_state.accumulated_fees.stablecoin_fees == 0, E_MUST_HANDLE_RESERVES_FIRST);
+        
         mint_state.stablecoin_address = new_stablecoin_address;
         mint_state.stablecoin_decimals = new_stablecoin_decimals;
     }
