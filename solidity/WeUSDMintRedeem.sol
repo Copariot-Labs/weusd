@@ -4,7 +4,7 @@ pragma solidity ^0.8.22;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
-import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./IPicweUSD.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 
@@ -185,7 +185,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      * @param weUSDAmount Amount in WeUSD decimals
      * @return Amount in stablecoin decimals (rounded down)
      */
-    function _convertWeUSDToStablecoin(uint256 weUSDAmount) internal view returns (uint256) {
+    function _toStablecoinAmountDown(uint256 weUSDAmount) internal view returns (uint256) {
         if (stablecoinDecimals == WEUSD_DECIMALS) {
             return weUSDAmount;
         } else if (stablecoinDecimals > WEUSD_DECIMALS) {
@@ -205,7 +205,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      * @param weUSDAmount Amount in WeUSD decimals
      * @return Amount in stablecoin decimals (rounded up if remainder exists)
      */
-    function _convertWeUSDToStablecoinForMint(uint256 weUSDAmount) internal view returns (uint256) {
+    function _toStablecoinAmountUp(uint256 weUSDAmount) internal view returns (uint256) {
         if (stablecoinDecimals == WEUSD_DECIMALS) {
             return weUSDAmount;
         } else if (stablecoinDecimals > WEUSD_DECIMALS) {
@@ -233,7 +233,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
         require(weUSDAmount >= minAmount, "Amount too small");
         
         // Calculate required stablecoin amount (rounded up)
-        uint256 scMintAmount = _convertWeUSDToStablecoinForMint(weUSDAmount);
+        uint256 scMintAmount = _toStablecoinAmountUp(weUSDAmount);
         
         // Validate user has sufficient balance and allowance
         require(stablecoin.balanceOf(msg.sender) >= scMintAmount, "Insufficient balance");
@@ -259,7 +259,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
         require(weUSDAmount >= minAmount, "Amount too small");
         
         // Calculate stablecoin amount to redeem (rounded down)
-        uint256 scRedeemAmount = _convertWeUSDToStablecoin(weUSDAmount);
+        uint256 scRedeemAmount = _toStablecoinAmountDown(weUSDAmount);
         require(stablecoinReserves >= scRedeemAmount, "Insufficient reserves");
         
         // Calculate fee and net amount
@@ -323,9 +323,9 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      *      and handles deficit repayment logic. Converts WeUSD amounts to stablecoin.
      * @param amount Amount to reserve in WeUSD units
      */
-    function reserveStablecoinForCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE) nonReentrant {
+    function reserveStablecoinForCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE){
         // Convert WeUSD amount to stablecoin amount
-        uint256 scAmount = _convertWeUSDToStablecoin(amount);
+        uint256 scAmount = _toStablecoinAmountDown(amount);
         
         // Calculate all values before any state changes (CEI pattern)
         uint256 toReserve = scAmount;
@@ -359,9 +359,9 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      *      amount exceeds available reserves by tracking deficit.
      * @param amount Amount to return in WeUSD units
      */
-    function returnStablecoinFromCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE) nonReentrant {
+    function returnStablecoinFromCrossChain(uint256 amount) external onlyRole(CROSS_CHAIN_ROLE){
         // Convert WeUSD amount to stablecoin amount
-        uint256 scAmount = _convertWeUSDToStablecoin(amount);
+        uint256 scAmount = _toStablecoinAmountDown(amount);
         
         // Calculate all values before any state changes (CEI pattern)
         uint256 deficit = 0;
@@ -397,7 +397,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      * @param amount Amount to withdraw in stablecoin units
      * @param recipient Address to receive the withdrawn funds
      */
-    function withdrawCrossChainReserves(uint256 amount, address recipient) external onlyRole(WITHDRAW_ROLE) nonReentrant {
+    function withdrawCrossChainReserves(uint256 amount, address recipient) external onlyRole(WITHDRAW_ROLE){
         require(recipient != address(0), "Recipient cannot be zero");
         require(crossChainReserves >= amount, "Insufficient reserves");
         
@@ -413,7 +413,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      * @dev Only balancer role can call this. Convenience function for balancer operations.
      * @param amount Amount to withdraw in stablecoin units
      */
-    function withdrawCrossChainReservesToBalancer(uint256 amount) external onlyRole(BALANCER_ROLE) nonReentrant {
+    function withdrawCrossChainReservesToBalancer(uint256 amount) external onlyRole(BALANCER_ROLE){
         require(crossChainReserves >= amount, "Insufficient reserves");
         
         // Transfer tokens and update state

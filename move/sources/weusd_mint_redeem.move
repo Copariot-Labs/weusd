@@ -115,15 +115,18 @@ module picwe::weusd_mint_redeem {
     
     // Convert WeUSD amount to stablecoin amount (round down)
     // Used for redeem operations to avoid giving more than deserved
-    fun to_stablecoin_amount_down(weusd_amount: u64): u64 {
+    fun to_stablecoin_amount_down(weusd_amount: u64): u64 acquires MintState {
+        let mint_state = borrow_global<MintState>(@picwe);
+        let stablecoin_decimals = mint_state.stablecoin_decimals;
+        
         let amt128 = (weusd_amount as u128);
-        let sc128 = if (STABLECOIN_DECIMALS == WEUSD_DECIMALS) {
+        let sc128 = if (stablecoin_decimals == WEUSD_DECIMALS) {
             amt128
-        } else if (STABLECOIN_DECIMALS > WEUSD_DECIMALS) {
-            let exp: u128 = ((STABLECOIN_DECIMALS - WEUSD_DECIMALS) as u128);
+        } else if (stablecoin_decimals > WEUSD_DECIMALS) {
+            let exp: u128 = ((stablecoin_decimals - WEUSD_DECIMALS) as u128);
             amt128 * math128::pow(10, exp)
         } else {
-            let exp: u128 = ((WEUSD_DECIMALS - STABLECOIN_DECIMALS) as u128);
+            let exp: u128 = ((WEUSD_DECIMALS - stablecoin_decimals) as u128);
             let divisor = math128::pow(10, exp);
             amt128 / divisor
         };
@@ -132,15 +135,18 @@ module picwe::weusd_mint_redeem {
     
     // Convert WeUSD amount to stablecoin amount (round up)
     // Used for mint operations to ensure sufficient collateral
-    fun to_stablecoin_amount_up(weusd_amount: u64): u64 {
+    fun to_stablecoin_amount_up(weusd_amount: u64): u64 acquires MintState {
+        let mint_state = borrow_global<MintState>(@picwe);
+        let stablecoin_decimals = mint_state.stablecoin_decimals;
+        
         let amt128 = (weusd_amount as u128);
-        let sc128 = if (STABLECOIN_DECIMALS == WEUSD_DECIMALS) {
+        let sc128 = if (stablecoin_decimals == WEUSD_DECIMALS) {
             amt128
-        } else if (STABLECOIN_DECIMALS > WEUSD_DECIMALS) {
-            let exp: u128 = ((STABLECOIN_DECIMALS - WEUSD_DECIMALS) as u128);
+        } else if (stablecoin_decimals > WEUSD_DECIMALS) {
+            let exp: u128 = ((stablecoin_decimals - WEUSD_DECIMALS) as u128);
             amt128 * math128::pow(10, exp)
         } else {
-            let exp: u128 = ((WEUSD_DECIMALS - STABLECOIN_DECIMALS) as u128);
+            let exp: u128 = ((WEUSD_DECIMALS - stablecoin_decimals) as u128);
             let divisor = math128::pow(10, exp);
             let tmp = amt128 / divisor;
             // Only round up if there's a remainder
@@ -328,17 +334,20 @@ module picwe::weusd_mint_redeem {
     ) acquires MintState {
         let mint_state = borrow_global_mut<MintState>(@picwe);
         
+        // Convert WeUSD amount to stablecoin amount
+        let sc_amount = to_stablecoin_amount_down(amount);
+        
         // Calculate the net amount that needs to be deducted from the reserves
         let to_reserve = if (mint_state.cross_chain_deficit > 0) {
-            let repay = if (amount <= mint_state.cross_chain_deficit) {
-                amount
+            let repay = if (sc_amount <= mint_state.cross_chain_deficit) {
+                sc_amount
             } else {
                 mint_state.cross_chain_deficit
             };
             mint_state.cross_chain_deficit = mint_state.cross_chain_deficit - repay;
-            amount - repay
+            sc_amount - repay
         } else {
-            amount
+            sc_amount
         };
         
         assert!(mint_state.stablecoin_reserves >= to_reserve, E_INSUFFICIENT_RESERVES);
@@ -359,13 +368,16 @@ module picwe::weusd_mint_redeem {
     ) acquires MintState {
         let mint_state = borrow_global_mut<MintState>(@picwe);
         
-        if (mint_state.cross_chain_reserves >= amount) {
+        // Convert WeUSD amount to stablecoin amount
+        let sc_amount = to_stablecoin_amount_down(amount);
+        
+        if (mint_state.cross_chain_reserves >= sc_amount) {
             // If we have enough reserves, return them to the pool
-            mint_state.cross_chain_reserves = mint_state.cross_chain_reserves - amount;
-            mint_state.stablecoin_reserves = mint_state.stablecoin_reserves + amount;
+            mint_state.cross_chain_reserves = mint_state.cross_chain_reserves - sc_amount;
+            mint_state.stablecoin_reserves = mint_state.stablecoin_reserves + sc_amount;
         } else {
             // If not enough reserves, record the deficit
-            let remaining_amount = amount - mint_state.cross_chain_reserves;
+            let remaining_amount = sc_amount - mint_state.cross_chain_reserves;
             mint_state.stablecoin_reserves = mint_state.stablecoin_reserves + mint_state.cross_chain_reserves;
             mint_state.cross_chain_reserves = 0;
             mint_state.cross_chain_deficit = mint_state.cross_chain_deficit + remaining_amount;
@@ -374,7 +386,7 @@ module picwe::weusd_mint_redeem {
 
     // Withdraw cross-chain reserves to specified recipient
     // @param sender: Must be authorized (contract owner or balancer)
-    // @param amount: Amount to withdraw
+    // @param amount: Amount to withdraw in stablecoin units
     // @param recipient: Recipient address (cannot be zero)
     public entry fun withdraw_cross_chain_reserves(
         sender: &signer,
@@ -407,7 +419,7 @@ module picwe::weusd_mint_redeem {
 
     // Withdraw cross-chain reserves to balancer address
     // @param sender: Must be authorized (contract owner or balancer)
-    // @param amount: Amount to withdraw
+    // @param amount: Amount to withdraw in stablecoin units
     public entry fun withdraw_cross_chain_reserves_to_balancer(
         sender: &signer,
         amount: u64
@@ -671,8 +683,9 @@ module picwe::weusd_mint_redeem {
         let cross_chain_amount = 500_000000;
         reserve_stablecoin_for_cross_chain(cross_chain_amount);
         
-        // Verify cross-chain reserves
-        assert!(get_cross_chain_reserves() == cross_chain_amount, E_INVALID_PARAMETER);
+        // Verify cross-chain reserves (now in stablecoin precision)
+        let expected_cross_chain_reserves = to_stablecoin_amount_down(cross_chain_amount);
+        assert!(get_cross_chain_reserves() == expected_cross_chain_reserves, E_INVALID_PARAMETER);
         
         // Try to withdraw more than available in cross-chain reserves
         let withdraw_amount = 600_000000; // 600 WEUSD
@@ -708,8 +721,11 @@ module picwe::weusd_mint_redeem {
         let cross_chain_amount = 300_000000;
         reserve_stablecoin_for_cross_chain(cross_chain_amount);
         
+        // Convert to stablecoin precision for verification
+        let expected_cross_chain_reserves = to_stablecoin_amount_down(cross_chain_amount);
+        
         // Verify initial cross-chain reserves
-        assert!(get_cross_chain_reserves() == cross_chain_amount, E_INVALID_PARAMETER);
+        assert!(get_cross_chain_reserves() == expected_cross_chain_reserves, E_INVALID_PARAMETER);
         assert!(get_cross_chain_deficit() == 0, E_INVALID_PARAMETER);
         
         // Try to return more stablecoin than we have in cross-chain reserves
@@ -719,11 +735,15 @@ module picwe::weusd_mint_redeem {
         // Verify that all cross-chain reserves were moved back to main reserves
         assert!(get_cross_chain_reserves() == 0, E_INVALID_PARAMETER);
         
-        // Verify that a deficit of 200 WEUSD was recorded (500 - 300)
-        assert!(get_cross_chain_deficit() == (return_amount - cross_chain_amount), E_INVALID_PARAMETER);
+        // Convert to stablecoin precision for deficit calculation
+        let return_amount_sc = to_stablecoin_amount_down(return_amount);
+        let expected_deficit = return_amount_sc - expected_cross_chain_reserves;
+        
+        // Verify that a deficit was recorded (in stablecoin precision)
+        assert!(get_cross_chain_deficit() == expected_deficit, E_INVALID_PARAMETER);
         
         // Verify that the main reserves increased by the cross-chain reserve amount (not the full return amount)
-        let expected_reserves = mint_amount; // Initial reserves should be preserved and the cross-chain reserves returned
+        let expected_reserves = to_stablecoin_amount_up(mint_amount); // Initial reserves should be preserved and the cross-chain reserves returned
         assert!(get_total_reserves() == expected_reserves, E_INVALID_PARAMETER);
     }
 }
