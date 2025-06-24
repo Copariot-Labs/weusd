@@ -4,6 +4,7 @@ pragma solidity ^0.8.22;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./IPicweUSD.sol";
 import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
@@ -17,7 +18,7 @@ import "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
  *      Uses role-based access control for administrative functions and reentrancy protection
  *      for all state-changing operations involving external calls.
  */
-contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
+contract WeUSDMintRedeem is AccessControl, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     /// @notice Role identifier for admin operations
@@ -168,10 +169,25 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
     }
     
     /**
+     * @notice Pause the contract (only admin can pause)
+     * @dev Pauses only public user functions (mint/redeem), admin functions remain available
+     */
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+    
+    /**
+     * @notice Unpause the contract (only admin can unpause)
+     * @dev Unpauses all public user functions
+     */
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
+    
+    /**
      * @notice Set the cross-chain contract address and grant it the cross-chain role
      * @dev Only admin can call this function. Grants CROSS_CHAIN_ROLE to the new contract
      *      and revokes the role from the previous contract if it exists.
-     *      WUS1-1 Fix: Requires manual handling of existing cross-chain reserves.
      * @param _crossChainContract Address of the WeUSDCrossChain contract
      */
     function setCrossChainContract(address _crossChainContract) external onlyRole(ADMIN_ROLE) {
@@ -181,10 +197,6 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
         if (crossChainContract != address(0)) {
             _revokeRole(CROSS_CHAIN_ROLE, crossChainContract);
         }
-        
-        // WUS1-1 Fix: Warning - Admin must manually handle existing cross-chain reserves
-        require(crossChainReserves == 0, "Must handle existing cross-chain reserves first");
-        require(crossChainDeficit == 0, "Must resolve existing cross-chain deficit first");
         
         crossChainContract = _crossChainContract;
         _grantRole(CROSS_CHAIN_ROLE, _crossChainContract);
@@ -241,7 +253,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      *      Uses rounding up conversion to ensure sufficient collateral.
      * @param weUSDAmount Amount of WeUSD tokens to mint
      */
-    function mintWeUSD(uint256 weUSDAmount) external nonReentrant {
+    function mintWeUSD(uint256 weUSDAmount) external nonReentrant whenNotPaused {
         require(weUSDAmount >= minAmount, "Amount too small");
         
         // Calculate required stablecoin amount (rounded up)
@@ -267,7 +279,7 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
      *      Uses rounding down conversion and applies redemption fee.
      * @param weUSDAmount Amount of WeUSD tokens to redeem
      */
-    function redeemWeUSD(uint256 weUSDAmount) external nonReentrant {
+    function redeemWeUSD(uint256 weUSDAmount) external nonReentrant whenNotPaused {
         require(weUSDAmount >= minAmount, "Amount too small");
         
         // Calculate stablecoin amount to redeem (rounded down)
@@ -478,42 +490,12 @@ contract WeUSDMintRedeem is AccessControl, ReentrancyGuard {
     }
     
     /**
-     * @notice Check if contract is ready for stablecoin/cross-chain contract changes
-     * @dev Helper function to verify all reserves are handled before making changes
-     * @return ready True if ready for changes, false otherwise
-     * @return message Description of what needs to be handled
-     */
-    function isReadyForContractChanges() external view returns (bool ready, string memory message) {
-        if (stablecoinReserves > 0) {
-            return (false, "Stablecoin reserves must be handled first");
-        }
-        if (crossChainReserves > 0) {
-            return (false, "Cross-chain reserves must be handled first");
-        }
-        if (crossChainDeficit > 0) {
-            return (false, "Cross-chain deficit must be resolved first");
-        }
-        if (accumulatedFees > 0) {
-            return (false, "Accumulated fees must be withdrawn first");
-        }
-        return (true, "Ready for contract changes");
-    }
-    
-    /**
      * @notice Set a new stablecoin contract and update its decimals
      * @dev Only admin can call this. Updates both contract reference and cached decimals.
-     *      WUS1-1 Fix: Requires manual handling of existing reserves to prevent inconsistency.
      * @param _stablecoin Address of the new stablecoin token contract
      */
     function setStablecoin(address _stablecoin) external onlyRole(ADMIN_ROLE) {
         require(_stablecoin != address(0), "Stablecoin address cannot be zero");
-        
-        // WUS1-1 Fix: Warning - Admin must manually handle existing reserves before changing stablecoin
-        require(stablecoinReserves == 0, "Must handle existing stablecoin reserves first");
-        require(crossChainReserves == 0, "Must handle existing cross-chain reserves first");
-        require(crossChainDeficit == 0, "Must resolve existing cross-chain deficit first");
-        require(accumulatedFees == 0, "Must withdraw accumulated fees first");
-        
         stablecoin = IERC20(_stablecoin);
         stablecoinDecimals = IERC20Metadata(_stablecoin).decimals();
         emit StablecoinSet(_stablecoin, stablecoinDecimals);

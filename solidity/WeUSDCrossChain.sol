@@ -3,6 +3,7 @@ pragma solidity ^0.8.22;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./IPicweUSD.sol";
 import "./IWeUSDMintRedeem.sol";
@@ -33,7 +34,7 @@ struct RequestData {
  *      with integrated fee collection, gas fee management, and request tracking.
  *      Uses role-based access control for administrative functions and cross-chain operations.
  */
-contract WeUSDCrossChain is AccessControl {
+contract WeUSDCrossChain is AccessControl, Pausable {
     /// @notice Role identifier for admin operations
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     /// @notice Role identifier for cross-chain minting operations
@@ -159,6 +160,22 @@ contract WeUSDCrossChain is AccessControl {
         _grantRole(ADMIN_ROLE, msg.sender);
         _grantRole(CROSS_CHAIN_MINTER_ROLE, _crossChainMinter);
     }
+    
+    /**
+     * @notice Pause the contract (only admin can pause)
+     * @dev Pauses only public user functions, admin functions remain available
+     */
+    function pause() external onlyRole(ADMIN_ROLE) {
+        _pause();
+    }
+    
+    /**
+     * @notice Unpause the contract (only admin can unpause)
+     * @dev Unpauses all public user functions
+     */
+    function unpause() external onlyRole(ADMIN_ROLE) {
+        _unpause();
+    }
 
     /**
      * @notice Set the mint/redeem contract address for reserve management
@@ -260,7 +277,7 @@ contract WeUSDCrossChain is AccessControl {
      * @param amount Total amount including fees to be processed
      * @param outerUser Target user identifier on destination chain
      */
-    function burnWeUSDCrossChain(uint256 targetChainId, uint256 amount, string memory outerUser) external {
+    function burnWeUSDCrossChain(uint256 targetChainId, uint256 amount, string memory outerUser) external whenNotPaused {
         require(targetChainId != block.chainid, "Target chain must be different from source chain");
         require(supportedChains[targetChainId], "Unsupported target chain");
         require(bytes(outerUser).length > 0, "Invalid outer user address");

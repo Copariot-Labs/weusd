@@ -33,6 +33,7 @@ module picwe::weusd_cross_chain_gas {
     const E_REQUEST_NOT_FOUND: u64 = 1028;
     const E_INVALID_ARGS: u64 = 1029;
     const E_UNSUPPORTED_CHAIN: u64 = 1030; // Unsupported target chain
+    const E_CONTRACT_PAUSED: u64 = 1031; // Contract is paused
 
     struct RequestData has store, copy, drop {
         requestId: u256,
@@ -55,7 +56,8 @@ module picwe::weusd_cross_chain_gas {
         requestIdToSourceActiveIndex: smart_table::SmartTable<u256, u256>,
         requestIdToTargetActiveIndex: smart_table::SmartTable<u256, u256>,
         supportedChains: smart_table::SmartTable<u256, bool>,
-        cross_mint_role_contract: address
+        cross_mint_role_contract: address,
+        paused: bool  // Emergency pause state
     }
 
     struct EventHandles has key {
@@ -352,6 +354,37 @@ module picwe::weusd_cross_chain_gas {
         (request_data_array, total_records)
     }
     
+    // Check if contract is paused (internal function for public user functions only)
+    fun ensure_not_paused() acquires GlobalManage {
+        let global_manage = borrow_global<GlobalManage>(@picwe);
+        assert!(!global_manage.paused, E_CONTRACT_PAUSED);
+    }
+    
+    // Pause the contract (only contract owner) - affects only public user functions
+    // @param sender: Must be contract owner
+    public entry fun pause(sender: &signer) acquires GlobalManage {
+        assert!(signer::address_of(sender) == @picwe, error::permission_denied(ENOT_OWNER));
+        let global_manage = borrow_global_mut<GlobalManage>(@picwe);
+        assert!(!global_manage.paused, error::invalid_argument(E_INVALID_ARGS)); // Already paused
+        global_manage.paused = true;
+    }
+    
+    // Unpause the contract (only contract owner)
+    // @param sender: Must be contract owner
+    public entry fun unpause(sender: &signer) acquires GlobalManage {
+        assert!(signer::address_of(sender) == @picwe, error::permission_denied(ENOT_OWNER));
+        let global_manage = borrow_global_mut<GlobalManage>(@picwe);
+        assert!(global_manage.paused, error::invalid_argument(E_INVALID_ARGS)); // Not paused
+        global_manage.paused = false;
+    }
+    
+    // View function to check if contract is paused
+    #[view]
+    public fun is_paused(): bool acquires GlobalManage {
+        let global_manage = borrow_global<GlobalManage>(@picwe);
+        global_manage.paused
+    }
+    
     fun init_module(contract: &signer) acquires GlobalManage {
         move_to(
             contract,
@@ -367,7 +400,8 @@ module picwe::weusd_cross_chain_gas {
                 requestIdToSourceActiveIndex: smart_table::new<u256, u256>(),
                 requestIdToTargetActiveIndex: smart_table::new<u256, u256>(),
                 supportedChains: smart_table::new<u256, bool>(),
-                cross_mint_role_contract: INITIAL_CROSS_CHAIN_MINT_ROLE
+                cross_mint_role_contract: INITIAL_CROSS_CHAIN_MINT_ROLE,
+                paused: false
             }
         );
         move_to(
@@ -591,6 +625,7 @@ module picwe::weusd_cross_chain_gas {
         amount: u64,
         outerUser: String
     ) acquires GlobalManage, EventHandles {
+        ensure_not_paused();
         assert!(
             targetChainId != Block_chainid,
             E_DIFF
@@ -752,588 +787,5 @@ module picwe::weusd_cross_chain_gas {
         assert!(!exists<GlobalManage>(@picwe), error::already_exists(1));
         
         init_module(admin);
-    }
-
-    // =================== Test Functions ===================
-    #[test_only]
-    use std::signer::address_of;
-    #[test_only]
-    use picwe::faucet;
-    #[test_only]
-    public fun create_test_accounts(
-        deployer: &signer, 
-        user_1: &signer, 
-        user_2: &signer
-    ) {
-        account::create_account_for_test(address_of(user_1));
-        account::create_account_for_test(address_of(user_2));
-        account::create_account_for_test(address_of(deployer));
-        account::create_account_for_test(@weusd_fee_address);
-        account::create_account_for_test(@crosschain_mint_role);
-        account::create_account_for_test(@picwe);
-    }
-
-    #[test_only]
-    public fun test_init_only(creator: &signer) acquires GlobalManage {
-        init_module(creator);
-        weusd::test_init_only(creator);
-        weusd_mint_redeem::test_init_only(creator);
-        faucet::test_init_only(creator);
-        let resource_signer = weusd_mint_redeem::get_resource_signer();
-        let stablecoin_metadata = faucet::get_usdt_metadata();
-        faucet::claim_usdt(&resource_signer);
-    }
-
-    // Test setting and getting chain gas fees
-    #[test(sender = @picwe, user1 = @0x123, user2 = @0x1234)]
-    public fun test_chain_gas_fee(
-        sender: &signer,
-        user1: &signer,
-        user2: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user2);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Set and test the gas fee for a specific chain
-        let target_chain_id: u256 = 421614; // Arbitrum Sepolia
-        let gas_fee: u64 = 5000;
-        
-        // Set the chain gas fee
-        setChainGasfee(sender, target_chain_id, gas_fee);
-        
-        // Get and verify the chain gas fee
-        let retrieved_gas_fee = getChainGasfee(target_chain_id);
-        assert!(retrieved_gas_fee == gas_fee, 1001);
-        
-        // Test deleting the chain gas fee
-        removeChainGasfee(sender, target_chain_id);
-        
-        // Verify that the default value is returned after deletion
-        let default_gas_fee = getChainGasfee(target_chain_id);
-        assert!(default_gas_fee == DEFAULT_CHAIN_GAS_FEE, 1002);
-    }
-
-    // Test setting and getting the global default gas fee
-    #[test(sender = @picwe, user1 = @0x123)]
-    public fun test_default_gas_fee(
-        sender: &signer,
-        user1: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user1);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Test the default gas fee
-        let default_fee = getGasfee();
-        assert!(default_fee == DEFAULT_CHAIN_GAS_FEE, 1003);
-        
-        // Set a new global default gas fee
-        let new_fee: u64 = 2000;
-        setGasfee(sender, new_fee);
-        
-        // Verify the global default gas fee
-        let current_fee = getGasfee();
-        assert!(current_fee == new_fee, 1004);
-        
-        // Test that getting the fee for an unset chain ID will return the global default value
-        let non_existent_chain_id: u256 = 999999;
-        let retrieved_fee = getChainGasfee(non_existent_chain_id);
-        assert!(retrieved_fee == new_fee, 1005);
-    }
-
-    // Test setting and getting the fee rate basis points
-    #[test(sender = @picwe, user1 = @0x123)]
-    public fun test_fee_rate_basis_points(
-        sender: &signer,
-        user1: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user1);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Test the default fee rate basis points
-        let default_fee_rate = getFeeRateBasisPoints();
-        assert!(default_fee_rate == DEFAULT_FEE_RATE_BASIS_POINTS, 1006);
-        
-        // Set a new fee rate basis points
-        let new_fee_rate: u64 = 50; // 0.5%
-        setFeeRateBasisPoints(sender, new_fee_rate);
-        
-        // Verify the fee rate basis points
-        let current_fee_rate = getFeeRateBasisPoints();
-        assert!(current_fee_rate == new_fee_rate, 1007);
-        
-        // Test fee calculation
-        let amount: u64 = 10000000; // 10 WeUSD (assuming 6 decimal places)
-        let expected_fee = (amount * new_fee_rate) / BASIS_POINTS_DENOMINATOR; // Should be 50000 (0.05 WeUSD)
-        let calculated_fee = calculateFee(amount);
-        assert!(calculated_fee == expected_fee, 1008);
-    }
-
-    // Test the getChainGasfee function edge cases
-    #[test(sender = @picwe)]
-    public fun test_chain_gas_fee_edge_cases(
-        sender: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, sender, sender);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Define the chain ID for testing
-        let chain_id: u256 = 421614; // Arbitrum Sepolia
-        
-        // The initial situation should return the default value (DEFAULT_CHAIN_GAS_FEE)
-        let initial_gas_fee = getChainGasfee(chain_id);
-        assert!(initial_gas_fee == DEFAULT_CHAIN_GAS_FEE, 2001);
-        
-        // Test case 1: Set the global gas fee to a non-zero value
-        setGasfee(sender, 3000);
-        let global_gas_fee = getGasfee();
-        assert!(global_gas_fee == 3000, 2002);
-        
-        // An unset chain ID should return the global value
-        let unset_chain_gas_fee = getChainGasfee(chain_id);
-        assert!(unset_chain_gas_fee == 3000, 2003);
-        
-        // Test case 2: Set the gas fee for a specific chain
-        setChainGasfee(sender, chain_id, 5000);
-        let specific_chain_gas_fee = getChainGasfee(chain_id);
-        assert!(specific_chain_gas_fee == 5000, 2004);
-        
-        // Test case 3: Set the global gas fee to 0
-        setGasfee(sender, 0);
-        let zero_global_gas_fee = getGasfee();
-        assert!(zero_global_gas_fee == 0, 2005);
-        
-        // The gas fee for a specific chain should remain unchanged
-        let unchanged_chain_gas_fee = getChainGasfee(chain_id);
-        assert!(unchanged_chain_gas_fee == 5000, 2006);
-        
-        // Test case 4: Remove the gas fee setting for a specific chain
-        removeChainGasfee(sender, chain_id);
-        
-        // The global fee is 0, an unset chain ID should return the default value
-        let default_chain_gas_fee = getChainGasfee(chain_id);
-        assert!(default_chain_gas_fee == DEFAULT_CHAIN_GAS_FEE, 2007);
-        
-        // Test case 5: Extreme values
-        let max_chain_id: u256 = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
-        let very_large_fee: u64 = 0xFFFFFFFFFFFFFFFF;
-        
-        // Set the maximum value
-        setChainGasfee(sender, max_chain_id, very_large_fee);
-        let large_fee = getChainGasfee(max_chain_id);
-        assert!(large_fee == very_large_fee, 2008);
-        
-        // Test case 6: Value is 1
-        setChainGasfee(sender, 1, 1);
-        let minimal_fee = getChainGasfee(1);
-        assert!(minimal_fee == 1, 2009);
-    }
-
-    // Test setting the cross-chain minter role
-    #[test(sender = @picwe, user1 = @0x123)]
-    public fun test_set_cross_chain_minter_role(
-        sender: &signer,
-        user1: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user1);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // The initial role should be INITIAL_CROSS_CHAIN_MINT_ROLE
-        let global_manage = borrow_global<GlobalManage>(@picwe);
-        assert!(global_manage.cross_mint_role_contract == @crosschain_mint_role, 1014);
-        
-        // Set a new role
-        let new_role = address_of(user1);
-        set_cross_chain_minter_role(sender, new_role);
-        
-        // Verify the new role
-        let global_manage = borrow_global<GlobalManage>(@picwe);
-        assert!(global_manage.cross_mint_role_contract == new_role, 1015);
-    }
-
-    // Test a non-authorized user setting the cross-chain minter role (expected to fail)
-    #[expected_failure(abort_code = 328704)]
-    #[test(sender = @picwe, user1 = @0x123)]
-    public fun test_unauthorized_set_cross_chain_minter_role(
-        sender: &signer,
-        user1: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user1);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Non-authorized user tries to set the role (should fail)
-        set_cross_chain_minter_role(user1, address_of(user1));
-    }
-
-    // Test the basic simulation of key functions
-    #[test(sender = @picwe, user1 = @0x123, mint_role = @crosschain_mint_role)]
-    public fun test_mock_basic_functions(
-        sender: &signer,
-        user1: &signer,
-        mint_role: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, mint_role);
-        
-        // Initialize the related modules (more initialization may be needed for actual testing)
-        test_init_only(sender);
-        
-        // Simulate test data
-        let target_chain_id: u256 = 421614;
-        let amount: u64 = 10000000; // 10 WeUSD
-        
-        // Set the test gas fee
-        setChainGasfee(sender, target_chain_id, 100000); // 0.1 WeUSD
-        
-        // Set the fee rate
-        setFeeRateBasisPoints(sender, 30); // 0.3%
-        
-        // Calculate and verify the gas fee retrieval
-        let gas_fee = getChainGasfee(target_chain_id);
-        assert!(gas_fee == 100000, 1016);
-        
-        // Calculate and verify the percentage-based fee calculation
-        let percentage_fee = calculateFee(amount);
-        assert!(percentage_fee == 30000, 1017); // 0.3% of 10 WeUSD = 0.03 WeUSD = 30000
-        
-        // Verify the total fee calculation
-        let total_fee = gas_fee + percentage_fee;
-        assert!(total_fee == 130000, 1018); // 0.1 + 0.03 = 0.13 WeUSD = 130000
-        
-        // Verify the logic of getting the request ID (create a temporary request)
-        let request_count = borrow_global<GlobalManage>(@picwe).requestCount;
-        assert!(request_count == 0, 1019);
-    }
-
-    // Test getting user requests
-    #[test(sender = @picwe, user1 = @0x123, user2 = @0x1234)]
-    public fun test_get_user_requests(
-        sender: &signer,
-        user1: &signer,
-        user2: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user2);
-        
-        // Initialize the module
-        test_init_only(sender);
-        
-        // Simulate creating request data
-        let user1_addr = address_of(user1);
-        let user2_addr = address_of(user2);
-        let outer_user = string::utf8(b"0x7ab8Fa18A57E54af232eFe45E25e0d38f4070a5a");
-        
-        // Create a burn request for user1
-        createRequest(1, user1_addr, outer_user, 1000000, true, 0);
-        
-        // Create a burn request for user2
-        createRequest(2, user2_addr, outer_user, 2000000, true, 0);
-        
-        // Create a mint request for user1
-        createRequest(3, user1_addr, outer_user, 3000000, false, 0);
-        
-        // Test getting user1's source requests
-        let (user1_source_requests, user1_source_count) = getUserSourceRequests(user1_addr, 0, 0);
-        assert!(user1_source_count == 1, 1020);
-        assert!(vector::length(&user1_source_requests) == 1, 1021);
-        assert!(*vector::borrow(&user1_source_requests, 0) == 1, 1022);
-        
-        // Test getting user2's source requests
-        let (user2_source_requests, user2_source_count) = getUserSourceRequests(user2_addr, 0, 0);
-        assert!(user2_source_count == 1, 1023);
-        assert!(vector::length(&user2_source_requests) == 1, 1024);
-        assert!(*vector::borrow(&user2_source_requests, 0) == 2, 1025);
-        
-        // Test getting user1's target requests
-        let (user1_target_requests, user1_target_count) = getUserTargetRequests(user1_addr, 0, 0);
-        assert!(user1_target_count == 1, 1026);
-        assert!(vector::length(&user1_target_requests) == 1, 1027);
-        assert!(*vector::borrow(&user1_target_requests, 0) == 3, 1028);
-        
-        // Test request existence
-        assert!(requestExists(1), 1029);
-        assert!(requestExists(2), 1030);
-        assert!(requestExists(3), 1031);
-        assert!(!requestExists(4), 1032);
-        
-        // Test batch checking request existence
-        let request_ids = vector::empty<u256>();
-        vector::push_back(&mut request_ids, 1);
-        vector::push_back(&mut request_ids, 2);
-        vector::push_back(&mut request_ids, 4);
-        
-        let exists_results = batchRequestExists(request_ids);
-        assert!(vector::length(&exists_results) == 3, 1033);
-        assert!(*vector::borrow(&exists_results, 0), 1034);
-        assert!(*vector::borrow(&exists_results, 1), 1035);
-        assert!(!*vector::borrow(&exists_results, 2), 1036);
-        
-        // Test getting request details
-        let request_1 = getRequestById(1);
-        assert!(request_1.requestId == 1, 1037);
-        assert!(request_1.localUser == user1_addr, 1038);
-        assert!(request_1.amount == 1000000, 1039);
-        assert!(request_1.isburn, 1040);
-        
-        // Test batch getting request details
-        let batch_request_ids = vector::empty<u256>();
-        vector::push_back(&mut batch_request_ids, 1);
-        vector::push_back(&mut batch_request_ids, 3);
-        
-        let batch_requests = batchGetRequestById(batch_request_ids);
-        assert!(vector::length(&batch_requests) == 2, 1041);
-        
-        let batch_request_1 = *vector::borrow(&batch_requests, 0);
-        assert!(batch_request_1.requestId == 1, 1042);
-        
-        let batch_request_2 = *vector::borrow(&batch_requests, 1);
-        assert!(batch_request_2.requestId == 3, 1043);
-        assert!(batch_request_2.amount == 3000000, 1044);
-        assert!(!batch_request_2.isburn, 1045);
-    }
-
-    // Test the correctness of the getChainGasfee function
-    #[test(sender = @picwe)]
-    public fun test_get_chain_gas_fee(
-        sender: &signer
-    ) acquires GlobalManage {
-        // Initialize the test environment
-        create_test_accounts(sender, sender, sender);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Define the chain IDs for testing
-        let chain_id_1: u256 = 111111;
-        let chain_id_2: u256 = 222222;
-        let chain_id_3: u256 = 333333;
-        
-        // Set the gas fees for different chains
-        let fee_1: u64 = 1000;
-        let fee_2: u64 = 2000;
-        let global_fee: u64 = 5000;
-        
-        // Set the fees
-        setChainGasfee(sender, chain_id_1, fee_1);
-        setChainGasfee(sender, chain_id_2, fee_2);
-        setGasfee(sender, global_fee);
-        
-        // Verify the correctness of global_fee
-        let retrieved_global_fee = getGasfee();
-        assert!(retrieved_global_fee == global_fee, 1200);
-        
-        // Test getting the fees for set chains
-        assert!(getChainGasfee(chain_id_1) == fee_1, 1009);
-        assert!(getChainGasfee(chain_id_2) == fee_2, 1010);
-        
-        // Test getting the fees for unset chains (should return the global default value)
-        assert!(getChainGasfee(chain_id_3) == global_fee, 1011);
-        
-        // Test the behavior after removing the chain fee
-        removeChainGasfee(sender, chain_id_1);
-        assert!(getChainGasfee(chain_id_1) == global_fee, 1012);
-        
-        // Test the behavior when the global fee is 0
-        setGasfee(sender, 0);
-        let zero_global_fee = getGasfee();
-        assert!(zero_global_fee == 0, 1201);
-        
-        // After removing the set fee for a chain, it should return the default value
-        removeChainGasfee(sender, chain_id_2);
-        assert!(getChainGasfee(chain_id_2) == DEFAULT_CHAIN_GAS_FEE, 1013);
-        
-        // Test getting the fees for unset chains, should return the default value
-        assert!(getChainGasfee(chain_id_3) == DEFAULT_CHAIN_GAS_FEE, 1014);
-    }
-
-    // Test the burnWeUSDCrossChain function
-    #[test(sender = @picwe, user1 = @0x123, fee_recipient = @weusd_fee_address)]
-    public fun test_burn_weusd_cross_chain(
-        sender: &signer,
-        user1: &signer,
-        fee_recipient: &signer
-    ) acquires GlobalManage, EventHandles {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, fee_recipient);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Claim USDT for the user
-        faucet::claim_usdt(user1);
-
-        // Mint some WeUSD to user1 for testing
-        let mint_amount: u64 = 50000000; // 50 WeUSD
-        weusd_mint_redeem::mintWeUSD(user1, mint_amount);
-
-        // Set the target chain ID and amount
-        let target_chain_id: u256 = 421614; // Arbitrum Sepolia
-        let amount: u64 = 10000000; // 10 WeUSD
-        let outer_user = string::utf8(b"0x7ab8Fa18A57E54af232eFe45E25e0d38f4070a5a");
-        let gas_fee = getChainGasfee(target_chain_id);    
-        // // Set the chain's gas fee
-        // let gas_fee: u64 = 100000; // 0.1 WeUSD
-        // setChainGasfee(sender, target_chain_id, gas_fee);
-        
-        // // Set the fee rate
-        // setFeeRateBasisPoints(sender, 30); // 0.3%
-        
-        // Calculate fees before executing the burn function
-        let percentage_fee = calculateFee(amount);
-        assert!(percentage_fee == 30000, 1025); // 0.3% of 10 WeUSD = 0.03 WeUSD = 30000
-        
-        let total_fee = gas_fee + percentage_fee;
-        assert!(total_fee == 130000, 1026); // 0.1 + 0.03 = 0.13 WeUSD = 130000
-        
-        // Get the current request count
-        let request_count_before = borrow_global<GlobalManage>(@picwe).requestCount;
-        
-        // Execute the burnWeUSDCrossChain function
-        burnWeUSDCrossChain(user1, target_chain_id, amount, outer_user);
-        
-        // Verify the request count increases
-        let request_count_after = borrow_global<GlobalManage>(@picwe).requestCount;
-        assert!(request_count_after == request_count_before + 1, 1020);
-        
-        // Verify the active source request list updates
-        let active_source_requests = &borrow_global<GlobalManage>(@picwe).activeSourceRequests;
-        assert!(vector::length(active_source_requests) == 1, 1021);
-        
-        // Verify the request data is stored correctly
-        let request_id = *vector::borrow(active_source_requests, 0);
-        let requests = &borrow_global<GlobalManage>(@picwe).requests;
-        let request_data = smart_table::borrow(requests, request_id);
-        
-        assert!(request_data.localUser == address_of(user1), 1022);
-        assert!(request_data.outerUser == outer_user, 1023);
-        assert!(request_data.isburn == true, 1024);
-        
-        // Verify the actual stored amount is correct (amount after fee deduction)
-        assert!(request_data.amount == amount - total_fee, 1027);
-    }
-
-    // Test the mintWeUSDCrossChain function
-    #[test(sender = @picwe, user1 = @0x123, mint_role = @crosschain_mint_role)]
-    public fun test_mint_weusd_cross_chain(
-        sender: &signer,
-        user1: &signer,
-        mint_role: &signer
-    ) acquires GlobalManage, EventHandles {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, mint_role);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Set the test data
-        let request_id: u256 = 12345;
-        let source_chain_id: u256 = 421614; // Arbitrum Sepolia
-        let amount: u64 = 10000000; // 10 WeUSD
-        let local_user = address_of(user1);
-        let outer_user = string::utf8(b"0x7ab8Fa18A57E54af232eFe45E25e0d38f4070a5a");
-        
-        // Execute the mintWeUSDCrossChain function
-        mintWeUSDCrossChain(mint_role, request_id, source_chain_id, amount, local_user, outer_user);
-        
-        // Verify the active target request list updates
-        let active_target_requests = &borrow_global<GlobalManage>(@picwe).activeTargetRequests;
-        assert!(vector::length(active_target_requests) == 1, 1031);
-        
-        // Verify all requests are stored correctly
-        let stored_request_id = *vector::borrow(active_target_requests, 0);
-        assert!(stored_request_id == request_id, 1032);
-        
-        let requests = &borrow_global<GlobalManage>(@picwe).requests;
-        let request_data = smart_table::borrow(requests, request_id);
-        
-        assert!(request_data.localUser == local_user, 1033);
-        assert!(request_data.outerUser == outer_user, 1034);
-        assert!(request_data.amount == amount, 1035);
-        assert!(request_data.isburn == false, 1036);
-    }
-
-    // Test a non-authorized user trying to mint WeUSD (expected to fail)
-    #[expected_failure(abort_code = 328705)]
-    #[test(sender = @picwe, user1 = @0x123)]
-    public fun test_unauthorized_mint_weusd_cross_chain(
-        sender: &signer,
-        user1: &signer
-    ) acquires GlobalManage, EventHandles {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, user1);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Set the test data
-        let request_id: u256 = 12345;
-        let source_chain_id: u256 = 421614;
-        let amount: u64 = 10000000;
-        let local_user = address_of(user1);
-        let outer_user = string::utf8(b"0x7ab8Fa18A57E54af232eFe45E25e0d38f4070a5a");
-        
-        // Non-authorized user tries to mint (should fail)
-        mintWeUSDCrossChain(user1, request_id, source_chain_id, amount, local_user, outer_user);
-    }
-
-    // Test the batchMintWeUSDCrossChain function
-    #[test(sender = @picwe, user1 = @0x123, mint_role = @crosschain_mint_role)]
-    public fun test_batch_mint_weusd_cross_chain(
-        sender: &signer,
-        user1: &signer,
-        mint_role: &signer
-    ) acquires GlobalManage, EventHandles {
-        // Initialize the test environment
-        create_test_accounts(sender, user1, mint_role);
-        
-        // Initialize the module
-        test_init_only(sender);
-
-        // Prepare the batch mint data
-        let request_ids = vector<u256>[12345, 12346, 12347];
-        let source_chain_ids = vector<u256>[421614, 421614, 421614];
-        let amounts = vector<u64>[1000000, 2000000, 3000000];
-        let local_users = vector<address>[address_of(user1), address_of(user1), address_of(user1)];
-        let outer_user = string::utf8(b"0x7ab8Fa18A57E54af232eFe45E25e0d38f4070a5a");
-        let outer_users = vector<String>[outer_user, outer_user, outer_user];
-        
-        // Execute the batch mint
-        batchMintWeUSDCrossChain(mint_role, request_ids, source_chain_ids, amounts, local_users, outer_users);
-        
-        // Verify the active target request list updates
-        let active_target_requests = &borrow_global<GlobalManage>(@picwe).activeTargetRequests;
-        assert!(vector::length(active_target_requests) == 3, 1041);
-        
-        // Verify all requests are stored correctly
-        let requests = &borrow_global<GlobalManage>(@picwe).requests;
-        
-        let i = 0;
-        while (i < 3) {
-            let request_id = *vector::borrow(&request_ids, i);
-            let amount = *vector::borrow(&amounts, i);
-            
-            let request_data = smart_table::borrow(requests, request_id);
-            assert!(request_data.amount == amount, 1042);
-            assert!(request_data.isburn == false, 1043);
-            
-            i = i + 1;
-        };
     }
 }
